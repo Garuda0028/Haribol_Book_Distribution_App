@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.env.tmp
+Haribol_Book_Distribution_Data/*.sqlite3
+Haribol_Book_Distribution_Data/*.sqlite3-shm
+Haribol_Book_Distribution_Data/*.sqlite3-wal
+Haribol_Book_Distribution_Data/Haribol_Book_Distribution.pid
+Haribol_Book_Distribution_Data/Haribol_Book_Distribution.state.json
+Haribol_Book_Distribution_Data/Haribol_Book_Distribution.state.tmp
+Haribol_Book_Distribution_Data/Haribol_Book_Distribution.log
+Haribol_Book_Distribution_Data/raw/*.csv

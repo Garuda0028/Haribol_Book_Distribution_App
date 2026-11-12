@@ -1,0 +1,454 @@
+import csv
+import io
+import ipaddress
+import math
+import socket
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Optional
+
+from .config import BOOK_CATALOGUE_PATH
+from .repository import execute, query_df, now_iso
+from .db import connect
+
+def _write_catalogue_file():
+    books = list_books(include_inactive=False)
+    BOOK_CATALOGUE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = BOOK_CATALOGUE_PATH.with_suffix(".tmp")
+    with temporary_path.open("w", encoding="utf-8-sig", newline="") as catalogue_file:
+        writer = csv.writer(catalogue_file)
+        writer.writerow(["book_name", "code", "book_tag", "price", "points"])
+        for _, book in books.iterrows():
+            writer.writerow([
+                book["book_name"],
+                book["code"],
+                book["book_tag"],
+                f'{float(book["price"]):.2f}',
+                str(float(book["default_points"])),
+            ])
+    temporary_path.replace(BOOK_CATALOGUE_PATH)
+
+def sync_book_catalogue():
+    if not BOOK_CATALOGUE_PATH.exists():
+        _write_catalogue_file()
+
+    with BOOK_CATALOGUE_PATH.open(encoding="utf-8-sig", newline="") as catalogue_file:
+        rows = _parse_catalogue(catalogue_file)
+
+    _apply_catalogue_rows(rows)
+
+
+def _parse_catalogue(source):
+    reader = csv.DictReader(source)
+    required_columns = {"book_name", "price", "points"}
+    if not reader.fieldnames or not required_columns.issubset(reader.fieldnames):
+        raise ValueError("Book catalogue CSV must contain book_name, price, and points columns.")
+    has_code = "code" in reader.fieldnames
+    has_tag = "book_tag" in reader.fieldnames
+    rows = []
+    seen_names = set()
+    seen_codes = set()
+    for row_number, row in enumerate(reader, start=2):
+        name = (row.get("book_name") or "").strip()
+        if not name:
+            raise ValueError(f"Book catalogue row {row_number}: book_name is required.")
+        if name.casefold() in seen_names:
+            raise ValueError(f"Book catalogue row {row_number}: duplicate book title '{name}'.")
+        seen_names.add(name.casefold())
+        try:
+            price = float(row["price"])
+            points = float(row["points"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Book catalogue row {row_number}: price and points must be valid numbers.") from exc
+        if not math.isfinite(price) or not math.isfinite(points) or price < 0 or points < 0:
+            raise ValueError(f"Book catalogue row {row_number}: price and points cannot be negative.")
+        code = (row.get("code") or "").strip() if has_code else None
+        book_tag = (row.get("book_tag") or "").strip() if has_tag else None
+        if code:
+            if code.casefold() in seen_codes:
+                raise ValueError(f"Book catalogue row {row_number}: duplicate book code '{code}'.")
+            seen_codes.add(code.casefold())
+        rows.append((name, price, points, code, book_tag))
+    return rows
+
+
+def import_catalogue_csv(content):
+    if len(content) > 2_000_000:
+        raise ValueError("The catalogue CSV must be 2 MB or smaller.")
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError("The catalogue CSV must use UTF-8 encoding.") from exc
+
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    if not reader.fieldnames:
+        raise ValueError("The catalogue CSV must contain a header row.")
+
+    header_aliases = {
+        "book_name": {"bookname", "book", "title", "booktitle"},
+        "price": {"price", "pricepercopy", "mrp", "sellingprice"},
+        "points": {"points", "point", "pointspercopy", "defaultpoints"},
+        "code": {"code", "bookcode", "shortcode"},
+        "book_tag": {"booktag", "tag", "category", "size"},
+    }
+    columns = {}
+    for field in reader.fieldnames:
+        normalized = "".join(character.lower() for character in field if character.isalnum())
+        for column, aliases in header_aliases.items():
+            if normalized in aliases:
+                if column in columns:
+                    raise ValueError(f"The catalogue CSV has more than one '{column}' column.")
+                columns[column] = field
+
+    if "book_name" not in columns or "price" not in columns:
+        raise ValueError(
+            "The catalogue CSV must contain a book name (book_name, book, or title) "
+            "and price column."
+        )
+
+    rows = []
+    seen_names = set()
+    seen_codes = set()
+    for row_number, row in enumerate(reader, start=2):
+        name = str(row.get(columns["book_name"]) or "").strip()
+        if not name:
+            raise ValueError(f"Catalogue row {row_number}: book name is required.")
+        if name.casefold() in seen_names:
+            raise ValueError(f"Catalogue row {row_number}: duplicate book title '{name}'.")
+        seen_names.add(name.casefold())
+
+        try:
+            price = float(str(row.get(columns["price"]) or "").strip())
+            raw_points = (
+                str(row.get(columns["points"]) or "").strip()
+                if "points" in columns
+                else ""
+            )
+            points = float(raw_points) if raw_points else None
+        except ValueError as exc:
+            raise ValueError(
+                f"Catalogue row {row_number}: price and supplied points must be numbers."
+            ) from exc
+        if (
+            not math.isfinite(price)
+            or price < 0
+            or (points is not None and (not math.isfinite(points) or points < 0))
+        ):
+            raise ValueError(
+                f"Catalogue row {row_number}: price and points must be finite and non-negative."
+            )
+
+        code = (
+            str(row.get(columns["code"]) or "").strip()
+            if "code" in columns
+            else ""
+        )
+        book_tag = (
+            str(row.get(columns["book_tag"]) or "").strip()
+            if "book_tag" in columns
+            else ""
+        )
+        if code:
+            if code.casefold() in seen_codes:
+                raise ValueError(f"Catalogue row {row_number}: duplicate book code '{code}'.")
+            seen_codes.add(code.casefold())
+        rows.append((name, price, points, code, book_tag))
+
+    if not rows:
+        raise ValueError("The catalogue CSV must contain at least one book.")
+
+    now = now_iso()
+    added = updated = 0
+    with connect() as con:
+        current_books = con.execute(
+            "SELECT id, book_name, code, book_tag, price, default_points, active FROM books"
+        ).fetchall()
+        books_by_name = {book["book_name"].casefold(): book for book in current_books}
+        books_by_code = {
+            book["code"].casefold(): book
+            for book in current_books
+            if book["code"]
+        }
+
+        for row_number, (name, price, points, code, book_tag) in enumerate(rows, start=2):
+            existing = books_by_name.get(name.casefold())
+            code_owner = books_by_code.get(code.casefold()) if code else None
+            if code_owner is not None and (
+                existing is None or code_owner["id"] != existing["id"]
+            ):
+                raise ValueError(
+                    f"Catalogue row {row_number}: short code '{code}' is already used by "
+                    f"'{code_owner['book_name']}'."
+                )
+
+        for name, price, points, code, book_tag in rows:
+            existing = books_by_name.get(name.casefold())
+            if existing is None:
+                new_points = points if points is not None else 1.0
+                cursor = con.execute(
+                    """
+                    INSERT INTO books
+                        (book_name, code, book_tag, default_points, price, active, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                    """,
+                    (name, code, book_tag, new_points, price, now, now),
+                )
+                added += 1
+                new_book = con.execute(
+                    "SELECT id, book_name, code, book_tag, price, default_points, active "
+                    "FROM books WHERE id=?",
+                    (cursor.lastrowid,),
+                ).fetchone()
+                books_by_name[name.casefold()] = new_book
+                if code:
+                    books_by_code[code.casefold()] = new_book
+                continue
+
+            new_code = code or existing["code"]
+            new_tag = book_tag or existing["book_tag"]
+            new_points = points if points is not None else existing["default_points"]
+            changed = (
+                float(existing["price"]) != price
+                or float(existing["default_points"]) != new_points
+                or existing["code"] != new_code
+                or existing["book_tag"] != new_tag
+                or not existing["active"]
+            )
+            if changed:
+                con.execute(
+                    """
+                    UPDATE books
+                    SET price=?, default_points=?, code=?, book_tag=?, active=1, updated_at=?
+                    WHERE id=?
+                    """,
+                    (price, new_points, new_code, new_tag, now, existing["id"]),
+                )
+                updated += 1
+
+    _write_catalogue_file()
+    return {"added": added, "updated": updated}
+
+
+def _apply_catalogue_rows(rows):
+    now = now_iso()
+    with connect() as con:
+        configured_names = {name.casefold() for name, _, _, _, _ in rows}
+        for name, price, points, code, book_tag in rows:
+            con.execute(
+                """
+                INSERT INTO books(book_name, code, book_tag, default_points, price, active, created_at, updated_at)
+                VALUES(?,?, ?,?,?,1,?,?)
+                ON CONFLICT(book_name) DO UPDATE SET
+                    code=CASE WHEN ? IS NULL THEN books.code ELSE ? END,
+                    book_tag=CASE WHEN ? IS NULL THEN books.book_tag ELSE ? END,
+                    default_points=excluded.default_points, price=excluded.price,
+                    active=1, updated_at=excluded.updated_at
+                WHERE books.default_points != excluded.default_points
+                   OR books.price != excluded.price OR books.active != 1
+                   OR (? IS NOT NULL AND books.code != ?)
+                   OR (? IS NOT NULL AND books.book_tag != ?)
+                """,
+                (
+                    name, code or "", book_tag or "", points, price, now, now,
+                    code, code or "", book_tag, book_tag or "",
+                    code, code or "", book_tag, book_tag or "",
+                ),
+            )
+        for book in con.execute("SELECT id, book_name FROM books WHERE active=1").fetchall():
+            if book["book_name"].casefold() not in configured_names:
+                con.execute("UPDATE books SET active=0, updated_at=? WHERE id=?", (now, book["id"]))
+
+
+def _validate_public_https_url(url):
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("Use a public HTTPS URL for the book catalogue CSV.")
+    try:
+        addresses = socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValueError(f"Could not resolve the catalogue URL host: {exc}") from exc
+    if not addresses or any(
+        not ipaddress.ip_address(address[4][0].split("%", 1)[0]).is_global
+        for address in addresses
+    ):
+        raise ValueError("The catalogue URL must resolve only to public internet addresses.")
+    return parsed
+
+
+class _PublicHttpsRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, new_url):
+        _validate_public_https_url(new_url)
+        return super().redirect_request(req, fp, code, msg, headers, new_url)
+
+
+def sync_book_catalogue_from_url(url):
+    _validate_public_https_url(url)
+    opener = urllib.request.build_opener(_PublicHttpsRedirectHandler)
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "HaribolBookDistribution/1.0"},
+    )
+    try:
+        with opener.open(request, timeout=10) as response:
+            content = response.read(2_000_001)
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError) as exc:
+        raise ValueError(f"Could not download the book catalogue CSV: {exc}") from exc
+    if len(content) > 2_000_000:
+        raise ValueError("The book catalogue CSV must be 2 MB or smaller.")
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError("The book catalogue CSV must use UTF-8 encoding.") from exc
+    rows = _parse_catalogue(io.StringIO(text, newline=""))
+    if not rows:
+        raise ValueError("The book catalogue CSV must contain at least one book.")
+
+    _apply_catalogue_rows(rows)
+    _write_catalogue_file()
+    return len(rows)
+
+
+def add_book(
+    name: str,
+    points: float = 1.0,
+    price: float = 0.0,
+    book_tag: str = "",
+    code: str = "",
+) -> None:
+    name = str(name or "").strip()
+    if not name:
+        raise ValueError("Book title is required.")
+    price, points = float(price), float(points)
+    book_tag = str(book_tag or "").strip()
+    code = str(code or "").strip()
+    if not math.isfinite(price) or price < 0:
+        raise ValueError("Price cannot be negative.")
+    if not math.isfinite(points) or points < 0:
+        raise ValueError("Points must be a finite, non-negative number.")
+    now = now_iso()
+    try:
+        execute(
+            "INSERT INTO books(book_name,book_tag,code,default_points,price,active,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,1,?,?)",
+            (name, book_tag, code, points, price, now, now),
+        )
+    except Exception as exc:
+        if "UNIQUE" in str(exc).upper():
+            message = (
+                "A book with that short code already exists."
+                if "IDX_BOOKS_CODE" in str(exc).upper()
+                else "A book with that title already exists."
+            )
+            raise ValueError(message) from exc
+        raise
+    _write_catalogue_file()
+
+def update_book(
+    book_id: int,
+    points: float,
+    price: Optional[float] = None,
+    name: Optional[str] = None,
+    active: Optional[bool] = None,
+    book_tag: Optional[str] = None,
+    code: Optional[str] = None,
+) -> None:
+    points = float(points)
+    if not math.isfinite(points) or points < 0:
+        raise ValueError("Points must be a finite, non-negative number.")
+    updates = ["default_points=?"]
+    values = [points]
+    if price is not None:
+        price = float(price)
+        if not math.isfinite(price) or price < 0:
+            raise ValueError("Price cannot be negative.")
+        updates.append("price=?")
+        values.append(price)
+    if name is not None:
+        name = str(name).strip()
+        if not name:
+            raise ValueError("Book title is required.")
+        updates.append("book_name=?")
+        values.append(name)
+    if active is not None:
+        updates.append("active=?")
+        values.append(int(bool(active)))
+    if book_tag is not None:
+        updates.append("book_tag=?")
+        values.append(str(book_tag or "").strip())
+    if code is not None:
+        updates.append("code=?")
+        values.append(str(code or "").strip())
+    updates.append("updated_at=?")
+    values.extend([now_iso(), int(book_id)])
+    try:
+        execute(
+            f"UPDATE books SET {', '.join(updates)} WHERE id=?",
+            tuple(values),
+        )
+    except Exception as exc:
+        if "UNIQUE" in str(exc).upper():
+            message = (
+                "A book with that short code already exists."
+                if "IDX_BOOKS_CODE" in str(exc).upper()
+                else "A book with that title already exists."
+            )
+            raise ValueError(message) from exc
+        raise
+    _write_catalogue_file()
+
+def deactivate_book(book_id):
+    execute("UPDATE books SET active=0, updated_at=? WHERE id=?", (now_iso(), int(book_id)))
+    _write_catalogue_file()
+
+def list_books(include_inactive=False):
+    sql = "SELECT id, book_name, book_tag, code, price, default_points, active, created_at, updated_at FROM books"
+    if not include_inactive:
+        sql += " WHERE active=1"
+    sql += " ORDER BY book_name COLLATE NOCASE"
+    return query_df(sql)
+
+def get_book_pricing(name):
+    df = query_df("SELECT default_points, price FROM books WHERE book_name = ? COLLATE NOCASE AND active=1", (name,))
+    if df.empty:
+        return None
+    return float(df.iloc[0]["default_points"]), float(df.iloc[0]["price"])
+
+def get_book_pricing_catalogue():
+    books = list_books()
+    return {
+        str(book["book_name"]).casefold(): (float(book["default_points"]), float(book["price"]))
+        for _, book in books.iterrows()
+    }
+
+
+def get_book_codes_catalogue():
+    books = list_books()
+    return {
+        str(book["code"]).strip().casefold(): str(book["book_name"])
+        for _, book in books.iterrows()
+        if str(book["code"]).strip()
+    }
+
+
+def refresh_sales_prices_from_catalogue():
+    with connect() as con:
+        cursor = con.execute(
+            """
+            UPDATE sales
+            SET unit_price = (
+                SELECT price FROM books
+                WHERE books.book_name = sales.book_name COLLATE NOCASE
+            )
+            WHERE unit_price != (
+                SELECT price FROM books
+                WHERE books.book_name = sales.book_name COLLATE NOCASE
+            )
+            AND amount_collected IS NULL
+            AND EXISTS (
+                SELECT 1 FROM books
+                WHERE books.book_name = sales.book_name COLLATE NOCASE
+            )
+            """
+        )
+        return cursor.rowcount

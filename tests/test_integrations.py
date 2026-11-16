@@ -1,3 +1,4 @@
+import io
 import json
 import sqlite3
 import sys
@@ -242,6 +243,38 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn(
             "/configured-sheet/values/responses!A:M",
             urlopen.call_args.args[0].full_url,
+        )
+
+    def test_sheet_fetch_surfaces_google_403_details(self):
+        response_body = json.dumps(
+            {"error": {"message": "The caller does not have permission"}}
+        ).encode("utf-8")
+        http_error = integrations.urllib.error.HTTPError(
+            "https://sheets.googleapis.com/",
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(response_body),
+        )
+        with patch.object(
+            integrations.urllib.request,
+            "urlopen",
+            side_effect=http_error,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "shared with the service-account email as Viewer",
+            ) as context:
+                integrations._fetch_sheet_records(
+                    "responses!A:M",
+                    set(),
+                    "responses",
+                    api_key="test-key",
+                )
+
+        self.assertIn(
+            "The caller does not have permission",
+            str(context.exception),
         )
 
     def test_response_import_is_idempotent_and_preserves_language(self):

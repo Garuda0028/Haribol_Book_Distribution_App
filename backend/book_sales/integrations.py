@@ -206,7 +206,29 @@ def _fetch_sheet_records(
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             payload = json.loads(response.read(5_000_001).decode("utf-8"))
-    except (OSError, urllib.error.URLError, urllib.error.HTTPError) as exc:
+    except urllib.error.HTTPError as exc:
+        detail = str(exc)
+        try:
+            error_payload = json.loads(exc.read(5_000_001).decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            pass
+        else:
+            google_error = (
+                error_payload.get("error")
+                if isinstance(error_payload, dict)
+                else None
+            )
+            if isinstance(google_error, dict) and google_error.get("message"):
+                detail = str(google_error["message"])
+        if exc.code == 403:
+            detail = (
+                "Google Sheets denied access (HTTP 403). Confirm the spreadsheet "
+                "is shared with the service-account email as Viewer (or is "
+                "public-readable when using an API key), and that the Google "
+                f"Sheets API is enabled. Google detail: {detail}"
+            )
+        raise ValueError(f"Could not read the {sheet_label} sheet: {detail}") from exc
+    except (OSError, urllib.error.URLError) as exc:
         raise ValueError(f"Could not read the {sheet_label} sheet: {exc}") from exc
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"The {sheet_label} sheet returned invalid JSON.") from exc

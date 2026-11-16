@@ -1,5 +1,12 @@
 # Release history
 
+## [1.10.0] - 2026-11-16
+
+- Read the configured spreadsheet URL from service-account secrets for catalogue, response, and submission syncs, with a built-in fallback
+- Accept rupee-formatted catalogue prices from spreadsheet CSV exports
+- Expand the dashboard layout to prevent page headings and descriptions from clipping
+- Update dashboard branding, About text, and server-storage wording for hosted use
+
 ## [1.9.0] - 2026-11-13
 
 - Add a Streamlit Community Cloud entry point and deployment guidance

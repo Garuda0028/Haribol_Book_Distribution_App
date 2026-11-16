@@ -410,18 +410,27 @@ def _render_app():
             font-size: .72rem;
             font-weight: 750;
             margin-bottom: .25rem;
+            overflow-wrap: anywhere;
         }
         .page-title {
+            display: block;
+            width: 100%;
+            max-width: none;
             color: var(--green-950);
             font-family: Georgia, "Palatino Linotype", serif;
             font-size: clamp(2.1rem, 3.5vw, 2.8rem);
             font-weight: 700;
             letter-spacing: -.025em;
+            line-height: 1.15;
             margin: 0 0 .45rem;
+            overflow-wrap: anywhere;
+            white-space: normal;
         }
         .page-subtitle {
+            display: block;
+            width: 100%;
             color: var(--green-800);
-            max-width: 74rem;
+            max-width: none;
             font-size: 1rem;
             line-height: 1.65;
             background: linear-gradient(105deg, rgba(232,243,236,.95), rgba(255,255,255,.8));
@@ -429,6 +438,8 @@ def _render_app():
             border-radius: 0 12px 12px 0;
             padding: .75rem 1rem;
             margin: 0 0 1.5rem;
+            overflow-wrap: anywhere;
+            white-space: normal;
         }
         h2, h3 { color: var(--green-900) !important; }
         [data-testid="stMetric"] {
@@ -486,7 +497,12 @@ def _render_app():
             background: white;
         }
         [data-testid="stMainBlockContainer"] {
-            padding-top: 2rem;
+            box-sizing: border-box;
+            width: 100%;
+            max-width: 100%;
+            padding-left: clamp(1rem, 3vw, 3rem);
+            padding-right: clamp(1rem, 3vw, 3rem);
+            padding-top: 4rem;
             padding-bottom: 3rem;
         }
         @media (prefers-reduced-motion: reduce) {
@@ -571,7 +587,7 @@ def _render_app():
                             )
                             st.rerun()
             st.divider()
-            st.caption(f"LOCAL DASHBOARD  ·  v{APP_VERSION}")
+            st.caption(f"PUBLIC DASHBOARD  ·  v{APP_VERSION}")
             return st.session_state.active_page
 
 
@@ -1239,8 +1255,8 @@ def _render_app():
 
         with st.expander("Data and backups"):
             st.caption(
-                "Your data is stored locally in the "
-                f"`{DATA_DIR.name}` folder. The full computer path is hidden."
+                "Application data is stored on the server in the "
+                f"`{DATA_DIR.name}` folder. The full server path is hidden."
             )
             st.download_button(
                 "Download complete data backup",
@@ -1269,7 +1285,8 @@ def _render_app():
             st.markdown(f"**{APP_NAME.replace('_', ' ')}**")
             st.write(f"Version **{APP_VERSION}**")
             st.caption(
-                "A local-first book distribution dashboard powered by Streamlit and SQLite."
+                "A hosted book distribution dashboard powered by Streamlit and SQLite, "
+                "with catalogue and website responses synced from Google Sheets."
             )
 
 

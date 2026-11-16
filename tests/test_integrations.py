@@ -28,6 +28,22 @@ class IntegrationTests(unittest.TestCase):
             ],
         )
 
+    def test_distribution_catalogue_accepts_rupee_formatted_prices(self):
+        parsed = integrations.parse_distribution_catalogue_csv(
+            "Book Category,Book,Language,Price,Points\n"
+            'Big Book,Title A,English,"₹1,280.00",2\n'.encode("utf-8")
+        )
+        self.assertEqual(
+            parsed,
+            [("Title A", "Big Book", "English", 1280.0, 2.0)],
+        )
+
+        with self.assertRaisesRegex(ValueError, "Price must be a number"):
+            integrations.parse_distribution_catalogue_csv(
+                "Book Category,Book,Language,Price,Points\n"
+                'Big Book,Title A,English,"₹not-a-number",2\n'.encode("utf-8")
+            )
+
     def test_catalogue_sync_reads_lists_tab_with_configured_api_key(self):
         records = [
             {
@@ -64,6 +80,29 @@ class IntegrationTests(unittest.TestCase):
             [("Title A", "Big Book", "English", 280.0, 2.0)],
         )
         self.assertEqual(result, {"added": 1})
+
+    def test_spreadsheet_id_uses_service_account_url_with_default_fallback(self):
+        self.assertEqual(
+            integrations._spreadsheet_id(
+                {
+                    "spreadsheet": (
+                        "https://docs.google.com/spreadsheets/d/"
+                        "configured-sheet_id/edit"
+                    )
+                }
+            ),
+            "configured-sheet_id",
+        )
+        self.assertEqual(
+            integrations._spreadsheet_id({}),
+            integrations.SPREADSHEET_ID,
+        )
+
+    def test_spreadsheet_id_rejects_non_google_sheets_urls(self):
+        with self.assertRaisesRegex(ValueError, "must be a Google Sheets URL"):
+            integrations._spreadsheet_id(
+                {"spreadsheet": "https://example.com/spreadsheets/d/sheet-id/edit"}
+            )
 
     def test_catalogue_sync_updates_variant_prices_and_points(self):
         connection = sqlite3.connect(":memory:")
@@ -168,6 +207,42 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(rows[0]["submissionid"], "sub-1")
         self.assertEqual(rows[0]["bookname"], "Title")
         self.assertIn("key=test-key", urlopen.call_args.args[0].full_url)
+
+    def test_sheet_fetch_uses_resolved_spreadsheet_id(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return json.dumps({"values": [["submission_id"]]}).encode("utf-8")
+
+        with (
+            patch.object(
+                integrations,
+                "_spreadsheet_id",
+                return_value="configured-sheet",
+            ),
+            patch.object(
+                integrations.urllib.request,
+                "urlopen",
+                return_value=FakeResponse(),
+            ) as urlopen,
+        ):
+            rows = integrations._fetch_sheet_records(
+                "responses!A:M",
+                set(),
+                "responses",
+                api_key="test-key",
+            )
+
+        self.assertEqual(rows, [])
+        self.assertIn(
+            "/configured-sheet/values/responses!A:M",
+            urlopen.call_args.args[0].full_url,
+        )
 
     def test_response_import_is_idempotent_and_preserves_language(self):
         connection = sqlite3.connect(":memory:")

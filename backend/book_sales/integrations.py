@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import math
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -32,6 +33,29 @@ _GOOGLE_SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets"
 
 def _normalize_header(value):
     return "".join(character.lower() for character in str(value) if character.isalnum())
+
+
+def _spreadsheet_id(service_account_info=None):
+    spreadsheet_url = str(
+        (service_account_info or {}).get("spreadsheet") or ""
+    ).strip()
+    if not spreadsheet_url:
+        return SPREADSHEET_ID
+
+    parsed_url = urllib.parse.urlparse(spreadsheet_url)
+    path_parts = parsed_url.path.strip("/").split("/")
+    if (
+        parsed_url.scheme != "https"
+        or parsed_url.hostname != "docs.google.com"
+        or len(path_parts) < 3
+        or path_parts[:2] != ["spreadsheets", "d"]
+        or not path_parts[2]
+        or not re.fullmatch(r"[A-Za-z0-9_-]+", path_parts[2])
+    ):
+        raise ValueError(
+            "The google_service_account.spreadsheet value must be a Google Sheets URL."
+        )
+    return path_parts[2]
 
 
 def parse_distribution_catalogue_csv(content):
@@ -72,8 +96,11 @@ def parse_distribution_catalogue_csv(content):
             if not raw_value:
                 values.append(None)
                 continue
+            numeric_value_text = raw_value.replace(",", "")
+            if field == "price":
+                numeric_value_text = numeric_value_text.replace("₹", "").strip()
             try:
-                numeric_value = float(raw_value.replace(",", ""))
+                numeric_value = float(numeric_value_text)
             except ValueError as exc:
                 raise ValueError(
                     f"Distribution catalogue row {row_number}: {field.title()} must be a number."
@@ -166,7 +193,8 @@ def _fetch_sheet_records(
             "to Streamlit Cloud Secrets before syncing."
         )
     encoded_range = urllib.parse.quote(sheet_range, safe="!:")
-    url = f"{_GOOGLE_SHEETS_API}/{SPREADSHEET_ID}/values/{encoded_range}"
+    spreadsheet_id = _spreadsheet_id(service_account_info)
+    url = f"{_GOOGLE_SHEETS_API}/{spreadsheet_id}/values/{encoded_range}"
     query = {
         "valueRenderOption": "UNFORMATTED_VALUE",
         "dateTimeRenderOption": "FORMATTED_STRING",

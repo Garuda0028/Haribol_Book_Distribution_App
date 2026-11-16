@@ -125,6 +125,7 @@ To sync website submissions while keeping the response sheet private, create a G
 
 ```toml
 [google_service_account]
+spreadsheet = "https://docs.google.com/spreadsheets/d/your-spreadsheet-id/edit"
 type = "service_account"
 project_id = "your-project-id"
 private_key_id = "your-private-key-id"
@@ -137,6 +138,8 @@ client_id = "your-client-id"
 token_uri = "https://oauth2.googleapis.com/token"
 ```
 
+The optional `spreadsheet` URL selects the workbook used for the `Lists`, `responses`, and `submissions` tabs. If omitted, the app uses its built-in workbook ID.
+
 The service-account credential stays on the server and is never sent to the browser. Do not paste it into source code or commit it. An API key can be used only if the workbook is public-readable; restrict that key to the Sheets API and store it in Cloud Secrets as `GOOGLE_SHEETS_API_KEY`. HTTP-referrer restrictions are not suitable for this server-to-server request. The **Response entry** page embeds the existing `books.iskw.in` form, which remains publicly accessible at its original URL even when this Streamlit app is private. Website submissions are imported with **Sync website responses**; there is no response CSV upload page. The spreadsheet's `Lists` tab supplies the live title, category, language, price, and points variants. The `responses` tab supplies book-level rows, including the submitted price, amount, points, and points total; these appear in **Book-level responses** and are also used in dashboard totals. The `submissions` tab supplies full-submission totals and Lakshmi/Shastra Daan values, shown in **Submission summaries**. Both catalogue and response data refresh on page open and every five minutes while their pages are open, or immediately with the sync button. Repeated syncs update changed rows and do not duplicate them. Website sales retain the values reported in the response sheet; later catalogue changes do not rewrite historical sales.
 
 The workbook tabs must have these headers (column names are case-insensitive): `Lists`: `Book Category, Book, Language, Price, Points`; `responses`: `submission_id, submitted_at, name, location, date, book_category, book_name, language, quantity, price, amount, points, points_total`; `submissions`: `submission_id, submitted_at, name, location, date, total_copies, total_points, lakshmi_due, lakshmi_transferred, shastra_daan`. The service account needs Viewer access to this workbook.
@@ -145,7 +148,7 @@ The workbook tabs must have these headers (column names are case-insensitive): `
 
 ## Book catalogue, prices, and points
 
-The **Book catalogue** page displays the title, category, language, price, and points variants synced from the spreadsheet's `Lists` tab. It refreshes automatically while the page is open and can also be refreshed with **Sync book list from Google Sheet**. This view is read-only: to add or change a title, language, price, or points value, edit the `Lists` tab in the source workbook. There is no local catalogue editor or CSV upload/link control. The app keeps an internal local catalogue mirror for its existing data and analytics services; it is not a separate source to maintain.
+The **Book catalogue** page displays the title, category, language, price, and points variants synced from the spreadsheet's `Lists` tab. It refreshes automatically while the page is open and can also be refreshed with **Sync book list from Google Sheet**. This view is read-only: to add or change a title, language, price, or points value, edit the `Lists` tab in the source workbook. Prices may be numeric or currency-formatted with `₹`; other text is not accepted. There is no local catalogue editor or CSV upload/link control. The app keeps an internal local catalogue mirror for its existing data and analytics services; it is not a separate source to maintain.
 
 New form imports store the reported amount collected and Shastra Daan for each book line, plus location and remarks. These reported amounts are preserved in dashboard totals and exports. Legacy imports use the catalogue price and points per copy available when they are imported; website response totals are preserved as reported by the spreadsheet.
 

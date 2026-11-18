@@ -1,8 +1,36 @@
 import os
 import re
+import urllib.parse
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
+DEFAULT_GOOGLE_SHEETS_SETTINGS = {
+    "spreadsheet_id": "",
+    "lists_tab": "Lists",
+    "responses_tab": "responses",
+    "submissions_tab": "submissions",
+}
+
+
+def normalize_spreadsheet_id(value):
+    value = str(value or "").strip()
+    if not value:
+        raise ValueError("A Google Sheets spreadsheet ID or URL is required.")
+    if "://" in value:
+        parsed_url = urllib.parse.urlparse(value)
+        path_parts = parsed_url.path.strip("/").split("/")
+        if (
+            parsed_url.scheme != "https"
+            or parsed_url.hostname != "docs.google.com"
+            or len(path_parts) < 3
+            or path_parts[:2] != ["spreadsheets", "d"]
+            or not re.fullmatch(r"[A-Za-z0-9_-]+", path_parts[2])
+        ):
+            raise ValueError("Enter a valid Google Sheets URL or spreadsheet ID.")
+        return path_parts[2]
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise ValueError("Enter a valid Google Sheets spreadsheet ID.")
+    return value
 
 
 def _read_app_version():

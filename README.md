@@ -6,7 +6,7 @@ The app can also be launched from Streamlit Community Cloud using `streamlit_app
 
 ## Configuration
 
-All app-level configuration is in the root `.env` file:
+General app preferences are in the root `.env` file:
 
 ```dotenv
 APP_NAME=Haribol_Book_Distribution
@@ -17,7 +17,7 @@ OVERALL_TARGET_END_DATE=
 FALLBACK_POINTS=1
 ```
 
-`APP_NAME` controls the displayed app identity. `BOOK_SALES_DATA_DIR` is the simple local data-folder name (relative to the project unless an absolute path is intentionally configured). `OVERALL_POINTS_TARGET` is the overall dashboard target; optional `OVERALL_TARGET_START_DATE` and `OVERALL_TARGET_END_DATE` values limit its progress calculation to an inclusive date period. Leave either date blank to keep that side of the period open. Dates use `YYYY-MM-DD`. `FALLBACK_POINTS` sets points for unknown titles. These settings can be updated in the UI; app-level preferences are saved back to `.env`.
+`APP_NAME` controls the displayed app identity. `BOOK_SALES_DATA_DIR` is the simple local data-folder name (relative to the project unless an absolute path is intentionally configured). `OVERALL_POINTS_TARGET` is the overall dashboard target; optional `OVERALL_TARGET_START_DATE` and `OVERALL_TARGET_END_DATE` values limit its progress calculation to an inclusive date period. Leave either date blank to keep that side of the period open. Dates use `YYYY-MM-DD`. `FALLBACK_POINTS` sets points for unknown titles. These preferences are saved back to `.env`. Google Sheets workbook ID and tab names are configurable from the app's Settings page and saved as non-secret application settings in SQLite.
 
 Environment variables with the same names override `.env`. The local `.env` file is gitignored; do not upload it. The Google Sheet is the source of truth for book variants, prices, and points. Individual devotee targets and sales records remain in the local database.
 
@@ -118,37 +118,38 @@ The Cloud entry point is `streamlit_app.py`. It invokes the existing dashboard d
 
 1. Push this project to a GitHub repository you can access. Do not commit `.env`, the local database, or imported sales CSVs.
 2. In [Streamlit Community Cloud](https://share.streamlit.io/), create an app from that repository and select the branch and `streamlit_app.py` as the **Main file path**.
-3. Deploy. The dependencies are installed from `requirements.txt`; no local launcher command or secrets are needed to open the app. Add the Google Sheets secret below to enable workbook sync.
+3. Deploy. The dependencies are installed from `requirements.txt`; no local launcher command is needed to open the app.
 4. Choose **Private** visibility in the Streamlit app settings and grant access only to approved users. The application itself does not provide login or role-based access.
 
-To sync website submissions while keeping the response sheet private, create a Google service account, enable the Google Sheets API, and share the response spreadsheet with the service account's email as a Viewer. Add its credentials as a server-side secret in the app's **Settings → Secrets** in Streamlit Community Cloud:
+To enable sync, create a Google service account, enable the Google Sheets API, and share the target spreadsheet with the service account's email as a Viewer. Add its credentials in Streamlit Community Cloud under **App settings → Secrets**, using TOML:
 
 ```toml
 [google_service_account]
-spreadsheet = "https://docs.google.com/spreadsheets/d/your-spreadsheet-id/edit"
 type = "service_account"
-project_id = "your-project-id"
+project_id = "your-google-cloud-project-id"
 private_key_id = "your-private-key-id"
 private_key = """-----BEGIN PRIVATE KEY-----
-your-private-key
+PASTE_THE_REMAINING_PRIVATE_KEY_LINES_HERE
 -----END PRIVATE KEY-----
 """
-client_email = "your-service-account@your-project-id.iam.gserviceaccount.com"
+client_email = "your-service-account@your-project.iam.gserviceaccount.com"
 client_id = "your-client-id"
 token_uri = "https://oauth2.googleapis.com/token"
 ```
 
-The optional `spreadsheet` URL selects the workbook used for the `Lists`, `responses`, and `submissions` tabs. If omitted, the app uses its built-in workbook ID.
+Replace every example value with the corresponding value from the downloaded service-account JSON. Preserve the private key lines and delimiters. Do not commit credentials to Git or share them in screenshots or messages. For local development, create `.streamlit/secrets.toml` with the same contents and keep it out of source control.
 
-The service-account credential stays on the server and is never sent to the browser. Do not paste it into source code or commit it. An API key can be used only if the workbook is public-readable; restrict that key to the Sheets API and store it in Cloud Secrets as `GOOGLE_SHEETS_API_KEY`. HTTP-referrer restrictions are not suitable for this server-to-server request. The **Response entry** page embeds the existing `books.iskw.in` form, which remains publicly accessible at its original URL even when this Streamlit app is private. Website submissions are imported with **Sync website responses**; there is no response CSV upload page. The spreadsheet's `Lists` tab supplies the live title, category, language, price, and points variants. The `responses` tab supplies book-level rows, including the submitted price, amount, points, and points total; these appear in **Book-level responses** and are also used in dashboard totals. The `submissions` tab supplies full-submission totals and Lakshmi/Shastra Daan values, shown in **Submission summaries**. Both catalogue and response data refresh on page open and every five minutes while their pages are open, or immediately with the sync button. Repeated syncs update changed rows and do not duplicate them. Website sales retain the values reported in the response sheet; later catalogue changes do not rewrite historical sales.
+In the app's **Settings → Google Sheets connection**, paste the spreadsheet ID or URL and enter the exact tab names. The workbook ID is not embedded in source code or stored in Streamlit Secrets. Select **Test connection** to check read-only access and validate the configured tab headers; after success, select **Save settings** to persist only the workbook settings. Sync actions then use the service account from Secrets. The app never writes service-account credentials to SQLite.
+
+Keep the Cloud app private and restrict access to who can use or edit its Secrets. This app has no separate user accounts or roles, so all dashboard users can initiate syncs. The **Response entry** page embeds the existing `books.iskw.in` form, which remains publicly accessible at its original URL even when this dashboard is private. Website submissions are imported with **Sync website responses**; there is no response CSV upload page. The `Lists` tab supplies the live title, category, language, price, and points variants. The `responses` tab supplies book-level rows, including the submitted price, amount, points, and points total; these appear in **Book-level responses** and dashboard totals. The `submissions` tab supplies full-submission totals and Lakshmi/Shastra Daan values shown in **Submission summaries**. Sync is manual. Repeated syncs update changed rows and do not duplicate them. Website sales retain the values reported in the response sheet; later catalogue changes do not rewrite historical sales.
 
 The workbook tabs must have these headers (column names are case-insensitive): `Lists`: `Book Category, Book, Language, Price, Points`; `responses`: `submission_id, submitted_at, name, location, date, book_category, book_name, language, quantity, price, amount, points, points_total`; `submissions`: `submission_id, submitted_at, name, location, date, total_copies, total_points, lakshmi_due, lakshmi_transferred, shastra_daan`. The service account needs Viewer access to this workbook.
 
-**Important: Community Cloud is not durable storage for this app's data.** Sales, targets, and settings are stored in local SQLite and `.env` files; those files can be lost when the app is restarted or redeployed. The catalogue can be synced again from the source sheet, and website responses can be fetched again from the response sheet, but app-only changes do not automatically persist. Keep the source sheet and independent backups, and migrate to durable hosted storage before relying on Cloud as the system of record.
+**Important: Community Cloud is not durable storage for this app's data.** Sales, targets, and workbook settings are stored in local SQLite and can be lost when the app is restarted or redeployed. Keep independent backups and migrate to durable hosted storage before relying on Cloud as the system of record. Google credentials remain in Streamlit Secrets and are separate from SQLite backups.
 
 ## Book catalogue, prices, and points
 
-The **Book catalogue** page displays the title, category, language, price, and points variants synced from the spreadsheet's `Lists` tab. It refreshes automatically while the page is open and can also be refreshed with **Sync book list from Google Sheet**. This view is read-only: to add or change a title, language, price, or points value, edit the `Lists` tab in the source workbook. Prices may be numeric or currency-formatted with `₹`; other text is not accepted. There is no local catalogue editor or CSV upload/link control. The app keeps an internal local catalogue mirror for its existing data and analytics services; it is not a separate source to maintain.
+The **Book catalogue** page displays the title, category, language, price, and points variants synced from the spreadsheet's configured catalogue tab. Use **Sync book list from Google Sheet** to refresh it. This view is read-only: to add or change a title, language, price, or points value, edit the source sheet. Prices may be numeric or currency-formatted with `₹`; other text is not accepted. There is no local catalogue editor or CSV upload/link control. The app keeps an internal local catalogue mirror for its existing data and analytics services; it is not a separate source to maintain.
 
 New form imports store the reported amount collected and Shastra Daan for each book line, plus location and remarks. These reported amounts are preserved in dashboard totals and exports. Legacy imports use the catalogue price and points per copy available when they are imported; website response totals are preserved as reported by the spreadsheet.
 
@@ -168,6 +169,7 @@ Haribol_Book_Distribution/
 │       ├── catalogue.py       # Book catalogue operations
 │       ├── sellers.py         # Devotee and target operations
 │       ├── settings.py        # Application settings
+│       ├── credentials.py    # Read-only Streamlit Secrets credential loader
 │       ├── importer.py        # CSV validation, deduplication and import
 │       ├── analytics.py       # Aggregations, leaderboard and exports
 │       └── services.py        # Public service facade

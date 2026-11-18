@@ -1,5 +1,6 @@
 """Start or stop the Haribol_Book_Distribution dashboard."""
 import argparse
+import hashlib
 import hmac
 import importlib.util
 import json
@@ -330,12 +331,16 @@ def _render_app():
         set_seller_target,
         sync_distribution_catalogue,
         sync_distribution_responses,
+        test_google_sheets_connection,
+        load_google_service_account,
         update_sale_points,
         list_book_variants,
     )
 
     st.set_page_config(page_title=APP_NAME, page_icon="📖", layout="wide")
     initialize_database()
+    for key in st.session_state.pop("_clear_settings_inputs", []):
+        st.session_state.pop(key, None)
 
     st.markdown(
         """
@@ -540,17 +545,54 @@ def _render_app():
     }
 
 
-    def _google_sheet_credentials():
-        from streamlit.errors import StreamlitSecretNotFoundError
+    def _google_sheet_config():
+        settings = get_settings()
+        return {
+            key: str(settings.get(key, "")).strip()
+            for key in (
+                "spreadsheet_id",
+                "lists_tab",
+                "responses_tab",
+                "submissions_tab",
+            )
+        }
 
-        try:
-            service_account_info = st.secrets.get("google_service_account")
-            api_key = st.secrets.get("GOOGLE_SHEETS_API_KEY", "")
-        except StreamlitSecretNotFoundError:
-            service_account_info = None
-            api_key = ""
-        api_key = api_key or os.environ.get("GOOGLE_SHEETS_API_KEY", "")
-        return api_key, dict(service_account_info) if service_account_info else None
+
+    def _google_sheet_credentials():
+        return load_google_service_account(st.secrets)
+
+
+    def _google_sheet_config_fingerprint(config):
+        serialized = json.dumps(config, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+    def _secure_action_feedback(
+        message,
+        is_error=False,
+        is_warning=False,
+        clear_keys=None,
+    ):
+        st.session_state["_secure_action_feedback"] = {
+            "message": str(message),
+            "is_error": bool(is_error),
+            "is_warning": bool(is_warning),
+        }
+        if clear_keys:
+            st.session_state["_clear_settings_inputs"] = clear_keys
+        st.rerun()
+
+
+    def _render_secure_action_feedback():
+        feedback = st.session_state.pop("_secure_action_feedback", None)
+        if not feedback:
+            return
+        if feedback["is_error"]:
+            st.error(feedback["message"])
+        elif feedback["is_warning"]:
+            st.warning(feedback["message"])
+        else:
+            st.success(feedback["message"])
 
 
     def _sidebar_navigation():
@@ -908,133 +950,114 @@ def _render_app():
             )
         with responses_tab:
             st.caption(
-                "The app refreshes the book list and response sheet on page open and every "
-                "5 minutes while this page is open. Use the button to sync immediately."
+                "Credentials are read from Streamlit Secrets. Remote rows are fetched and "
+                "validated before any local changes are committed."
             )
-
-            @st.fragment(run_every="5m")
-            def _render_synced_responses():
-                api_key, service_account_info = _google_sheet_credentials()
-                has_credentials = bool(service_account_info or api_key)
-                sync_requested = st.button(
-                    "Sync website responses now",
-                    type="primary",
-                    key="sync_website_responses_now",
+            _render_secure_action_feedback()
+            try:
+                service_account_info = _google_sheet_credentials()
+            except ValueError as exc:
+                service_account_info = None
+                st.error(f"Invalid Google service-account secret: {exc}")
+            if not service_account_info:
+                st.info(
+                    "Configure [google_service_account] in Streamlit Secrets before syncing."
                 )
-                last_sync = st.session_state.get("website_responses_last_sync", 0)
-                auto_sync_due = (
-                    has_credentials and time.monotonic() - last_sync >= 300
-                )
-                if sync_requested or auto_sync_due:
-                    if not has_credentials:
-                        st.error(
-                            "Configure the Google service account in Streamlit Cloud Secrets "
-                            "before syncing the response sheet."
+            else:
+                with st.form("website_response_sync_form"):
+                    sync_requested = st.form_submit_button(
+                        "Sync website responses now",
+                        type="primary",
+                    )
+                if sync_requested:
+                    try:
+                        result = sync_distribution_responses(
+                            service_account_info=service_account_info,
+                            spreadsheet_config=_google_sheet_config(),
                         )
-                    else:
-                        try:
-                            result = sync_distribution_responses(
-                                api_key,
-                                service_account_info,
-                            )
-                            st.session_state.website_responses_last_sync = time.monotonic()
-                            if result["invalid"] or result["submissions_invalid"]:
-                                st.warning(
-                                    f"Sync completed with {result['invalid']} invalid row(s). "
-                                    f"{result['added']} book row(s) added, "
-                                    f"{result['updated']} updated; "
-                                    f"{result['duplicates']} unchanged. "
-                                    f"{result['submissions_invalid']} invalid submission summary row(s)."
-                                )
-                            else:
-                                st.success(
-                                    f"Sync complete: {result['added']} added, "
-                                    f"{result['updated']} updated; "
-                                    f"{result['duplicates']} unchanged."
-                                )
-                            st.caption(
-                                f"Catalogue: {result['catalogue_added']} new title(s), "
-                                f"{result['catalogue_updated']} updated; "
-                                f"{result['variants_added']} new language variant(s), "
-                                f"{result['variants_updated']} updated."
-                            )
-                            st.caption(
-                                f"Submission summaries: {result['submissions_added']} new, "
-                                f"{result['submissions_updated']} updated, "
-                                f"{result['submissions_unchanged']} unchanged, "
-                                f"{result['submissions_invalid']} invalid."
-                            )
-                            if result["issues"]:
-                                st.write("\n".join(result["issues"]))
-                            if result["submission_issues"]:
-                                st.write("\n".join(result["submission_issues"]))
-                        except (ValueError, OSError, sqlite3.Error) as exc:
-                            st.error(f"Could not sync website responses: {exc}")
+                        st.session_state.website_responses_last_sync = time.monotonic()
+                        _secure_action_feedback(
+                            f"Sync complete: {result['added']} added, "
+                            f"{result['updated']} updated, "
+                            f"{result['duplicates']} unchanged. Catalogue: "
+                            f"{result['catalogue_added']} new title(s), "
+                            f"{result['catalogue_updated']} updated; summaries: "
+                            f"{result['submissions_added']} new, "
+                            f"{result['submissions_updated']} updated."
+                            + (
+                                f" {result['catalogue_file_warning']}"
+                                if result.get("catalogue_file_warning")
+                                else ""
+                            ),
+                            is_warning=bool(result.get("catalogue_file_warning")),
+                        )
+                    except (ValueError, OSError, sqlite3.Error) as exc:
+                        _secure_action_feedback(
+                            f"Could not sync website responses: {exc}",
+                            is_error=True,
+                        )
 
-                if not has_credentials:
-                    st.info(
-                        "Add the Google service account in Streamlit Cloud → App settings → "
-                        "Secrets. The response sheet is not fetched until server credentials are configured."
+            last_sync = st.session_state.get("website_responses_last_sync")
+            if last_sync is not None:
+                st.caption("Last successful sync completed in this session.")
+
+            book_rows_tab, submissions_tab = st.tabs(
+                ["Book-level responses", "Submission summaries"]
+            )
+            with book_rows_tab:
+                website_sales = list_sales()
+                website_sales = website_sales[
+                    website_sales["source_file"] == "IBC Sarjapur web form"
+                ]
+                if website_sales.empty:
+                    st.info("No website responses have been synced yet.")
+                else:
+                    sales_display = _sales_display_frame(website_sales)
+                    st.caption(
+                        f"{len(website_sales):,} website response row(s) are in the app's sales history."
+                    )
+                    st.dataframe(
+                        sales_display,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    st.download_button(
+                        "Download website responses CSV",
+                        export_sales_csv(sales_display),
+                        "ibc_sarjapur_book_distribution.csv",
+                        "text/csv",
+                    )
+            with submissions_tab:
+                summaries = list_website_submissions()
+                if summaries.empty:
+                    st.info("No submission summaries have been synced yet.")
+                else:
+                    summaries = summaries.rename(
+                        columns={
+                            "submission_id": "Submission ID",
+                            "submitted_at": "Submitted at",
+                            "seller_name": "Name",
+                            "location": "Location",
+                            "sale_date": "Date",
+                            "total_copies": "Total copies",
+                            "total_points": "Total points",
+                            "lakshmi_due": "Lakshmi due",
+                            "lakshmi_transferred": "Lakshmi transferred",
+                            "shastra_daan": "Shastra Daan",
+                        }
+                    ).drop(columns=["updated_at"])
+                    st.dataframe(
+                        summaries,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    st.download_button(
+                        "Download submission summaries CSV",
+                        export_csv(summaries),
+                        "ibc_sarjapur_submission_summaries.csv",
+                        "text/csv",
                     )
 
-                book_rows_tab, submissions_tab = st.tabs(
-                    ["Book-level responses", "Submission summaries"]
-                )
-                with book_rows_tab:
-                    website_sales = list_sales()
-                    website_sales = website_sales[
-                        website_sales["source_file"] == "IBC Sarjapur web form"
-                    ]
-                    if website_sales.empty:
-                        st.info("No website responses have been synced yet.")
-                    else:
-                        sales_display = _sales_display_frame(website_sales)
-                        st.caption(
-                            f"{len(website_sales):,} website response row(s) are in the app's sales history."
-                        )
-                        st.dataframe(
-                            sales_display,
-                            use_container_width=True,
-                            hide_index=True,
-                        )
-                        st.download_button(
-                            "Download website responses CSV",
-                            export_sales_csv(sales_display),
-                            "ibc_sarjapur_book_distribution.csv",
-                            "text/csv",
-                        )
-                with submissions_tab:
-                    summaries = list_website_submissions()
-                    if summaries.empty:
-                        st.info("No submission summaries have been synced yet.")
-                    else:
-                        summaries = summaries.rename(
-                            columns={
-                                "submission_id": "Submission ID",
-                                "submitted_at": "Submitted at",
-                                "seller_name": "Name",
-                                "location": "Location",
-                                "sale_date": "Date",
-                                "total_copies": "Total copies",
-                                "total_points": "Total points",
-                                "lakshmi_due": "Lakshmi due",
-                                "lakshmi_transferred": "Lakshmi transferred",
-                                "shastra_daan": "Shastra Daan",
-                            }
-                        ).drop(columns=["updated_at"])
-                        st.dataframe(
-                            summaries,
-                            use_container_width=True,
-                            hide_index=True,
-                        )
-                        st.download_button(
-                            "Download submission summaries CSV",
-                            export_csv(summaries),
-                            "ibc_sarjapur_submission_summaries.csv",
-                            "text/csv",
-                        )
-
-            _render_synced_responses()
 
 
     def _render_catalogue():
@@ -1045,66 +1068,81 @@ def _render_app():
         )
         st.caption(
             "The Google Sheet is the source of truth. Update its Lists tab to change the "
-            "catalogue; this page is read-only."
+            "catalogue; this page is read-only. Sync is manual and uses the Google service "
+            "account configured in Streamlit Secrets."
         )
-        if st.button("Sync book list from Google Sheet"):
-            try:
-                api_key, service_account_info = _google_sheet_credentials()
-                result = sync_distribution_catalogue(api_key, service_account_info)
-                st.success(
-                    f"Sheet sync complete: {result['added']} new title(s), "
-                    f"{result['updated']} title(s) updated; "
-                    f"{result['variants_added']} new language variant(s), "
-                    f"{result['variants_updated']} updated."
+        _render_secure_action_feedback()
+        try:
+            service_account_info = _google_sheet_credentials()
+        except ValueError as exc:
+            service_account_info = None
+            st.error(f"Invalid Google service-account secret: {exc}")
+        if service_account_info:
+            with st.form("catalogue_sync_form"):
+                sync_requested = st.form_submit_button(
+                    "Sync book list from Google Sheet",
+                    type="primary",
                 )
-                st.session_state.book_catalogue_last_sync = time.monotonic()
-                st.rerun()
-            except (ValueError, OSError, sqlite3.Error) as exc:
-                st.error(f"Could not sync the book list: {exc}")
-
-        @st.fragment(run_every="5m")
-        def _render_sheet_catalogue():
-            last_sync = st.session_state.get("book_catalogue_last_sync", 0)
-            if time.monotonic() - last_sync >= 300:
+            if sync_requested:
                 try:
-                    api_key, service_account_info = _google_sheet_credentials()
-                    sync_distribution_catalogue(api_key, service_account_info)
+                    result = sync_distribution_catalogue(
+                        service_account_info=service_account_info,
+                        spreadsheet_config=_google_sheet_config(),
+                    )
                     st.session_state.book_catalogue_last_sync = time.monotonic()
+                    _secure_action_feedback(
+                        f"Catalogue sync complete: {result['added']} new title(s), "
+                        f"{result['updated']} title(s) updated; "
+                        f"{result['variants_added']} new language variant(s), "
+                        f"{result['variants_updated']} updated."
+                        + (
+                            f" {result['catalogue_file_warning']}"
+                            if result.get("catalogue_file_warning")
+                            else ""
+                        ),
+                        is_warning=bool(result.get("catalogue_file_warning")),
+                    )
                 except (ValueError, OSError, sqlite3.Error) as exc:
-                    st.error(f"Could not refresh the spreadsheet catalogue: {exc}")
-            variants = list_book_variants(include_inactive=True)
-            st.markdown("#### Catalogue from spreadsheet")
-            if variants.empty:
-                st.info("Sync the spreadsheet to load book languages, prices, and points.")
-            else:
-                variants = variants.rename(
-                    columns={
-                        "book_name": "Book",
-                        "book_category": "Category",
-                        "language": "Language",
-                        "price": "Price (₹)",
-                        "points": "Points",
-                        "active": "In sheet",
-                        "updated_at": "Synced at",
-                    }
-                )
-                st.dataframe(
-                    variants[
-                        [
-                            "Book",
-                            "Category",
-                            "Language",
-                            "Price (₹)",
-                            "Points",
-                            "In sheet",
-                            "Synced at",
-                        ]
-                    ],
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                    _secure_action_feedback(
+                        f"Could not sync the book list: {exc}",
+                        is_error=True,
+                    )
+        else:
+            st.info(
+                "Configure [google_service_account] in Streamlit Secrets before syncing."
+            )
 
-        _render_sheet_catalogue()
+        variants = list_book_variants(include_inactive=True)
+        st.markdown("#### Catalogue from spreadsheet")
+        if variants.empty:
+            st.info("Sync the spreadsheet to load book languages, prices, and points.")
+        else:
+            variants = variants.rename(
+                columns={
+                    "book_name": "Book",
+                    "book_category": "Category",
+                    "language": "Language",
+                    "price": "Price (₹)",
+                    "points": "Points",
+                    "active": "In sheet",
+                    "updated_at": "Synced at",
+                }
+            )
+            st.dataframe(
+                variants[
+                    [
+                        "Book",
+                        "Category",
+                        "Language",
+                        "Price (₹)",
+                        "Points",
+                        "In sheet",
+                        "Synced at",
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
 
     def _render_devotees():
         _page_heading("People & goals", "Devotees and targets", "Keep your devotee directory and individual goals up to date.")
@@ -1252,6 +1290,171 @@ def _render_app():
                         st.rerun()
                     except (ValueError, OSError) as exc:
                         st.error(f"Could not save preferences: {exc}")
+
+        with st.expander("Google Sheets connection", expanded=True):
+            st.info(
+                "Keep workbook settings editable here. Google service-account credentials "
+                "are read only from Streamlit Secrets and are never saved in the app database."
+            )
+            st.caption(
+                "The spreadsheet ID and tab names are non-secret settings stored by the app. "
+                "Store the service-account fields under [google_service_account] in Streamlit "
+                "Cloud → App settings → Secrets. For local development, use "
+                ".streamlit/secrets.toml and keep it out of source control."
+            )
+            st.warning(
+                "This app has no separate user accounts or roles. Anyone who can use this "
+                "dashboard can initiate syncs, so keep the Streamlit app private."
+            )
+            _render_secure_action_feedback()
+            current_config = _google_sheet_config()
+            try:
+                secrets_are_configured = bool(_google_sheet_credentials())
+            except ValueError as exc:
+                secrets_are_configured = False
+                st.error(f"Invalid Google service-account secret: {exc}")
+            if secrets_are_configured:
+                st.success("Google service-account credentials are available from Secrets.")
+            else:
+                st.info(
+                    "No [google_service_account] entry was found in Streamlit Secrets."
+                )
+
+            with st.form("google_sheets_settings_form"):
+                spreadsheet_id = st.text_input(
+                    "Spreadsheet ID or Google Sheets URL",
+                    value=current_config["spreadsheet_id"],
+                    key="google_sheets_spreadsheet_id",
+                    help="Paste the workbook URL or its ID. No workbook ID is embedded in the app.",
+                )
+                lists_tab = st.text_input(
+                    "Catalogue tab name",
+                    value=current_config["lists_tab"],
+                    key="google_sheets_lists_tab",
+                )
+                responses_tab = st.text_input(
+                    "Book responses tab name",
+                    value=current_config["responses_tab"],
+                    key="google_sheets_responses_tab",
+                )
+                submissions_tab = st.text_input(
+                    "Submission summaries tab name",
+                    value=current_config["submissions_tab"],
+                    key="google_sheets_submissions_tab",
+                )
+                test_button, save_button, discard_button = st.columns(3)
+                test_connection = test_button.form_submit_button("Test connection")
+                save_connection = save_button.form_submit_button(
+                    "Save settings", type="primary"
+                )
+                discard_changes = discard_button.form_submit_button("Discard")
+
+            staged_config = {
+                "spreadsheet_id": spreadsheet_id,
+                "lists_tab": lists_tab,
+                "responses_tab": responses_tab,
+                "submissions_tab": submissions_tab,
+            }
+            if discard_changes:
+                st.session_state.pop("_google_sheets_tested_config_hash", None)
+                _secure_action_feedback(
+                    "Unsaved Google Sheets changes were discarded.",
+                    clear_keys=[
+                        "google_sheets_spreadsheet_id",
+                        "google_sheets_lists_tab",
+                        "google_sheets_responses_tab",
+                        "google_sheets_submissions_tab",
+                    ],
+                )
+            config_fingerprint = _google_sheet_config_fingerprint(staged_config)
+            if (
+                st.session_state.get("_google_sheets_tested_config_hash")
+                == config_fingerprint
+            ):
+                st.info(
+                    "These staged settings passed the read-only connection test. "
+                    "Select Save settings to apply them, or Discard."
+                )
+            if test_connection:
+                try:
+                    service_account_info = _google_sheet_credentials()
+                    if not service_account_info:
+                        raise ValueError(
+                            "Add the [google_service_account] table to Streamlit "
+                            "Secrets before testing the connection."
+                        )
+                    reached = test_google_sheets_connection(
+                        service_account_info=service_account_info,
+                        spreadsheet_config=staged_config,
+                    )
+                    reached_message = (
+                        f"Connected to spreadsheet {reached['spreadsheet_id']}; "
+                        f"reached tabs: {', '.join(reached['tabs'])}. "
+                        "Save these tested settings or discard them."
+                    )
+                    st.session_state["_google_sheets_tested_config_hash"] = (
+                        config_fingerprint
+                    )
+                    _secure_action_feedback(reached_message)
+                except (ValueError, OSError, sqlite3.Error) as exc:
+                    st.session_state.pop("_google_sheets_tested_config_hash", None)
+                    _secure_action_feedback(
+                        f"Google Sheets connection failed: {exc}",
+                        is_error=True,
+                    )
+            if save_connection:
+                if (
+                    st.session_state.get("_google_sheets_tested_config_hash")
+                    != config_fingerprint
+                ):
+                    st.session_state.pop(
+                        "_google_sheets_tested_config_hash",
+                        None,
+                    )
+                    _secure_action_feedback(
+                        "Test the current spreadsheet settings before saving.",
+                        is_error=True,
+                    )
+                try:
+                    save_settings(staged_config)
+                    st.session_state.pop(
+                        "_google_sheets_tested_config_hash",
+                        None,
+                    )
+                    _secure_action_feedback(
+                        "Google Sheets settings saved. Credentials remain in Streamlit Secrets."
+                    )
+                except (ValueError, OSError, sqlite3.Error) as exc:
+                    _secure_action_feedback(
+                        f"Could not save Google Sheets settings: {exc}",
+                        is_error=True,
+                    )
+
+            with st.expander("Streamlit Secrets format"):
+                st.caption(
+                    "Paste your actual Google service-account values in Streamlit Cloud's "
+                    "Secrets editor (TOML format). Do not use the example placeholders."
+                )
+                st.code(
+                    '[google_service_account]\n'
+                    'type = "service_account"\n'
+                    'project_id = "your-google-cloud-project-id"\n'
+                    'private_key_id = "your-private-key-id"\n'
+                    'private_key = """-----BEGIN PRIVATE KEY-----\n'
+                    "PASTE_THE_REMAINING_PRIVATE_KEY_LINES_HERE\n"
+                    '-----END PRIVATE KEY-----\n'
+                    '"""\n'
+                    'client_email = "your-service-account@your-project.iam.gserviceaccount.com"\n'
+                    'client_id = "your-client-id"\n'
+                    'token_uri = "https://oauth2.googleapis.com/token"',
+                    language="toml",
+                )
+                st.caption(
+                    "Do not include the spreadsheet ID in this block. In Google Cloud, "
+                    "enable the Sheets API and share the workbook with client_email as a "
+                    "Viewer. Restrict who can edit app Secrets. Rotate the service-account "
+                    "key if it is ever exposed."
+                )
 
         with st.expander("Data and backups"):
             st.caption(

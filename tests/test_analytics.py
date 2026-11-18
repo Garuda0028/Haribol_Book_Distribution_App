@@ -123,6 +123,35 @@ class AnalyticsTests(unittest.TestCase):
             }
         )
 
+    def test_google_sheet_settings_save_to_database(self):
+        connection = sqlite3.connect(":memory:")
+        connection.execute(
+            "CREATE TABLE settings (setting_key TEXT PRIMARY KEY, setting_value TEXT)"
+        )
+        try:
+            with patch("book_sales.settings.connect", return_value=connection):
+                save_settings(
+                    {
+                        "spreadsheet_id": (
+                            "https://docs.google.com/spreadsheets/d/"
+                            "configured-sheet_id/edit"
+                        ),
+                        "lists_tab": "Books",
+                        "responses_tab": "Web responses",
+                        "submissions_tab": "Summaries",
+                    }
+                )
+
+            settings = dict(
+                connection.execute(
+                    "SELECT setting_key, setting_value FROM settings"
+                ).fetchall()
+            )
+            self.assertEqual(settings["spreadsheet_id"], "configured-sheet_id")
+            self.assertEqual(settings["lists_tab"], "Books")
+        finally:
+            connection.close()
+
 
 if __name__ == "__main__":
     unittest.main()

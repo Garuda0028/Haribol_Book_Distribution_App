@@ -11,7 +11,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from book_sales.analytics import accumulated_points, export_csv, export_sales_csv
-from book_sales.settings import save_settings
+from book_sales.settings import get_settings, save_settings
 
 
 class AnalyticsTests(unittest.TestCase):
@@ -139,6 +139,9 @@ class AnalyticsTests(unittest.TestCase):
                         "lists_tab": "Books",
                         "responses_tab": "Web responses",
                         "submissions_tab": "Summaries",
+                        "google_sheets_auto_sync": True,
+                        "google_sheets_sync_interval_minutes": 5,
+                        "google_sheets_manual_sync": False,
                     }
                 )
 
@@ -149,8 +152,43 @@ class AnalyticsTests(unittest.TestCase):
             )
             self.assertEqual(settings["spreadsheet_id"], "configured-sheet_id")
             self.assertEqual(settings["lists_tab"], "Books")
+            self.assertEqual(settings["google_sheets_auto_sync"], "1")
+            self.assertEqual(settings["google_sheets_sync_interval_minutes"], "5")
+            self.assertEqual(settings["google_sheets_manual_sync"], "0")
         finally:
             connection.close()
+
+    def test_google_sheet_sync_settings_default_to_five_minutes_and_manual_allowed(self):
+        connection = sqlite3.connect(":memory:")
+        connection.execute(
+            "CREATE TABLE settings (setting_key TEXT PRIMARY KEY, setting_value TEXT)"
+        )
+        try:
+            with (
+                patch("book_sales.settings.connect", return_value=connection),
+                patch("book_sales.settings.get_env_setting", return_value=None),
+            ):
+                settings = get_settings()
+
+            self.assertEqual(settings["google_sheets_auto_sync"], "1")
+            self.assertEqual(settings["google_sheets_sync_interval_minutes"], "5")
+            self.assertEqual(settings["google_sheets_manual_sync"], "1")
+        finally:
+            connection.close()
+
+    def test_google_sheet_sync_interval_must_be_whole_minutes_between_one_and_1440(self):
+        for invalid_interval in (0, 1441, 5.5, "five"):
+            with self.subTest(interval=invalid_interval):
+                with self.assertRaisesRegex(ValueError, "sync interval"):
+                    save_settings(
+                        {
+                            "google_sheets_sync_interval_minutes": invalid_interval,
+                        }
+                    )
+
+    def test_google_sheet_sync_boolean_settings_reject_invalid_values(self):
+        with self.assertRaisesRegex(ValueError, "must be a boolean"):
+            save_settings({"google_sheets_manual_sync": "sometimes"})
 
 
 if __name__ == "__main__":

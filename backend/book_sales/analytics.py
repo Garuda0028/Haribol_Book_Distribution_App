@@ -102,7 +102,8 @@ def book_performance(sale_date=None):
 def list_sales():
     return query_df("""
         SELECT id, form_timestamp, external_submission_id, seller_name, sale_date,
-               location, book_name, book_category, language, quantity, points,
+               location, book_name, book_category, book_sub_category, language,
+               quantity, points,
                COALESCE(reported_points_total, points * quantity) AS total_points, unit_price,
                COALESCE(amount_collected, unit_price * quantity) AS amount_collected,
                shastra_daan, remarks, source_file, imported_at

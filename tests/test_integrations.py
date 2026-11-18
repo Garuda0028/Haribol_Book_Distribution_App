@@ -45,7 +45,7 @@ class IntegrationTests(unittest.TestCase):
                 'Big Book,Title A,English,"₹not-a-number",2\n'.encode("utf-8")
             )
 
-    def test_catalogue_sync_reads_lists_tab_with_configured_api_key(self):
+    def test_catalogue_sync_reads_configured_lists_tab_with_api_key(self):
         records = [
             {
                 "bookcategory": "Big Book",
@@ -67,14 +67,24 @@ class IntegrationTests(unittest.TestCase):
                 return_value={"added": 1},
             ) as merge,
         ):
-            result = integrations.sync_distribution_catalogue("test-key")
+            spreadsheet_config = {
+                "spreadsheet_id": "configured-sheet",
+                "lists_tab": "Book Lists",
+                "responses_tab": "responses",
+                "submissions_tab": "submissions",
+            }
+            result = integrations.sync_distribution_catalogue(
+                "test-key",
+                spreadsheet_config=spreadsheet_config,
+            )
 
         fetch.assert_called_once_with(
-            integrations.LISTS_RANGE,
+            "'Book Lists'!A:E",
             {"bookcategory", "book", "language", "price", "points"},
             "Lists",
             "test-key",
             None,
+            spreadsheet_config,
         )
         self.assertEqual(
             merge.call_args.args[0],
@@ -82,11 +92,11 @@ class IntegrationTests(unittest.TestCase):
         )
         self.assertEqual(result, {"added": 1})
 
-    def test_spreadsheet_id_uses_service_account_url_with_default_fallback(self):
+    def test_spreadsheet_id_accepts_id_or_google_sheets_url(self):
         self.assertEqual(
             integrations._spreadsheet_id(
                 {
-                    "spreadsheet": (
+                    "spreadsheet_id": (
                         "https://docs.google.com/spreadsheets/d/"
                         "configured-sheet_id/edit"
                     )
@@ -95,15 +105,76 @@ class IntegrationTests(unittest.TestCase):
             "configured-sheet_id",
         )
         self.assertEqual(
-            integrations._spreadsheet_id({}),
-            integrations.SPREADSHEET_ID,
+            integrations._spreadsheet_id({"spreadsheet_id": "configured_sheet-id"}),
+            "configured_sheet-id",
         )
+        with self.assertRaisesRegex(ValueError, "spreadsheet ID or URL is required"):
+            integrations._spreadsheet_id({"spreadsheet_id": ""})
 
     def test_spreadsheet_id_rejects_non_google_sheets_urls(self):
-        with self.assertRaisesRegex(ValueError, "must be a Google Sheets URL"):
+        with self.assertRaisesRegex(ValueError, "valid Google Sheets URL"):
             integrations._spreadsheet_id(
-                {"spreadsheet": "https://example.com/spreadsheets/d/sheet-id/edit"}
+                {"spreadsheet_id": "https://example.com/spreadsheets/d/sheet-id/edit"}
             )
+
+    def test_connection_test_checks_all_configured_tabs_read_only(self):
+        spreadsheet_config = {
+            "spreadsheet_id": "configured-sheet",
+            "lists_tab": "Books",
+            "responses_tab": "Website responses",
+            "submissions_tab": "Summary",
+        }
+        with patch.object(
+            integrations,
+            "_fetch_sheet_records",
+            return_value=[],
+        ) as fetch:
+            result = integrations.test_google_sheets_connection(
+                service_account_info={"type": "service_account"},
+                spreadsheet_config=spreadsheet_config,
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "spreadsheet_id": "configured-sheet",
+                "tabs": ["Books", "Website responses", "Summary"],
+            },
+        )
+        self.assertEqual(fetch.call_count, 3)
+        self.assertEqual(
+            fetch.call_args_list[0].args[0],
+            "'Books'!A1:E1",
+        )
+        self.assertEqual(
+            fetch.call_args_list[1].args[0],
+            "'Website responses'!A1:M1",
+        )
+        self.assertEqual(
+            fetch.call_args_list[2].args[0],
+            "'Summary'!A1:J1",
+        )
+
+    def test_connection_test_reports_tabs_reached_before_failure(self):
+        spreadsheet_config = {
+            "spreadsheet_id": "configured-sheet",
+            "lists_tab": "Books",
+            "responses_tab": "Wrong responses tab",
+            "submissions_tab": "Summary",
+        }
+        with patch.object(
+            integrations,
+            "_fetch_sheet_records",
+            side_effect=[[], ValueError("missing required columns")],
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "Tabs reached before failure: Books. missing required columns",
+            ):
+                integrations.test_google_sheets_connection(
+                    service_account_info={"type": "service_account"},
+                    spreadsheet_config=spreadsheet_config,
+                )
 
     def test_catalogue_sync_updates_variant_prices_and_points(self):
         connection = sqlite3.connect(":memory:")
@@ -203,7 +274,15 @@ class IntegrationTests(unittest.TestCase):
             "urlopen",
             return_value=FakeResponse(),
         ) as urlopen:
-            rows = integrations.fetch_response_sheet("test-key")
+            rows = integrations.fetch_response_sheet(
+                "test-key",
+                spreadsheet_config={
+                    "spreadsheet_id": "configured-sheet",
+                    "lists_tab": "Lists",
+                    "responses_tab": "responses",
+                    "submissions_tab": "submissions",
+                },
+            )
 
         self.assertEqual(rows[0]["submissionid"], "sub-1")
         self.assertEqual(rows[0]["bookname"], "Title")
@@ -270,12 +349,19 @@ class IntegrationTests(unittest.TestCase):
                     set(),
                     "responses",
                     api_key="test-key",
+                    spreadsheet_config={
+                        "spreadsheet_id": "configured-sheet",
+                        "lists_tab": "Lists",
+                        "responses_tab": "responses",
+                        "submissions_tab": "submissions",
+                    },
                 )
 
         self.assertIn(
             "The caller does not have permission",
             str(context.exception),
         )
+        self.assertIn("Google Sheets API is enabled", str(context.exception))
 
     def test_response_import_is_idempotent_and_preserves_language(self):
         connection = sqlite3.connect(":memory:")
@@ -409,6 +495,132 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual((unchanged["added"], unchanged["unchanged"]), (0, 1))
             self.assertEqual((updated["updated"], updated["unchanged"]), (1, 0))
             self.assertEqual(tuple(saved), ("sub-1", 3, 5.0, 200.0, 100.0, 50.0))
+        finally:
+            connection.close()
+
+    def test_full_sync_rolls_back_catalogue_and_responses_on_invalid_summary(self):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.executescript(
+            """
+            CREATE TABLE books (
+                id INTEGER PRIMARY KEY, book_name TEXT UNIQUE COLLATE NOCASE,
+                book_tag TEXT, languages TEXT, default_points REAL, price REAL,
+                active INTEGER, created_at TEXT, updated_at TEXT
+            );
+            CREATE TABLE book_variants (
+                id INTEGER PRIMARY KEY, book_id INTEGER,
+                language TEXT COLLATE NOCASE, book_category TEXT,
+                price REAL, points REAL, active INTEGER, updated_at TEXT,
+                UNIQUE(book_id, language)
+            );
+            CREATE TABLE sellers (
+                id INTEGER PRIMARY KEY, seller_name TEXT UNIQUE,
+                active INTEGER, created_at TEXT
+            );
+            CREATE TABLE sales (
+                id INTEGER PRIMARY KEY, row_key TEXT UNIQUE,
+                form_timestamp TEXT, seller_name TEXT, sale_date TEXT,
+                book_name TEXT, language TEXT, book_category TEXT,
+                external_submission_id TEXT, location TEXT, remarks TEXT,
+                points REAL, quantity INTEGER, unit_price REAL,
+                amount_collected REAL, shastra_daan REAL,
+                reported_points_total REAL, source_file TEXT, imported_at TEXT
+            );
+            CREATE TABLE import_runs (
+                id INTEGER PRIMARY KEY, source_file TEXT, imported_at TEXT,
+                rows_seen INTEGER, rows_added INTEGER, duplicates_skipped INTEGER,
+                invalid_rows INTEGER, notes TEXT
+            );
+            CREATE TABLE website_submissions (
+                submission_id TEXT PRIMARY KEY, submitted_at TEXT,
+                seller_name TEXT, location TEXT, sale_date TEXT,
+                total_copies INTEGER, total_points REAL, lakshmi_due REAL,
+                lakshmi_transferred REAL, shastra_daan REAL, updated_at TEXT
+            );
+            """
+        )
+        response = {
+            "submissionid": "sub-1",
+            "submittedat": "2026-11-18T10:00:00Z",
+            "name": "Devotee",
+            "location": "Sarjapur",
+            "date": "2026-11-18",
+            "bookcategory": "Big Book",
+            "bookname": "Title",
+            "language": "English",
+            "quantity": "1",
+            "price": "50",
+            "amount": "50",
+            "points": "1",
+            "pointstotal": "1",
+        }
+        invalid_summary = {
+            "submissionid": "sub-1",
+            "submittedat": "2026-11-18T10:00:00Z",
+            "name": "Devotee",
+            "location": "Sarjapur",
+            "date": "2026-11-18",
+            "totalcopies": "1",
+            "totalpoints": "-1",
+            "lakshmidue": "50",
+            "lakshmitransferred": "50",
+            "shastradaan": "0",
+        }
+        try:
+            with (
+                patch.object(integrations, "connect", return_value=connection),
+                patch.object(
+                    integrations,
+                    "get_settings",
+                    return_value={"fallback_points": "1"},
+                ),
+                patch.object(
+                    integrations,
+                    "fetch_response_sheet",
+                    return_value=[response],
+                ),
+                patch.object(
+                    integrations,
+                    "fetch_submission_sheet",
+                    return_value=[invalid_summary],
+                ),
+                patch.object(
+                    integrations,
+                    "_fetch_distribution_catalogue_rows",
+                    return_value=[
+                        ("Title", "Big Book", "English", 50.0, 1.0)
+                    ],
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "no spreadsheet data was applied",
+                ):
+                    integrations.sync_distribution_responses(
+                        service_account_info={"type": "service_account"},
+                        spreadsheet_config={
+                            "spreadsheet_id": "test-sheet",
+                            "lists_tab": "Lists",
+                            "responses_tab": "responses",
+                            "submissions_tab": "submissions",
+                        },
+                    )
+
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM books").fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM sales").fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM website_submissions"
+                ).fetchone()[0],
+                0,
+            )
         finally:
             connection.close()
 

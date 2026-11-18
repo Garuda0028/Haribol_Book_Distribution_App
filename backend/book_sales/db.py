@@ -105,6 +105,7 @@ def initialize_database():
     now = datetime.now().astimezone().isoformat(timespec="seconds")
     with connect() as con:
         con.executescript(SCHEMA)
+        con.execute("DROP TABLE IF EXISTS encrypted_credentials")
         _add_column_if_missing(con, "books", "price", "REAL NOT NULL DEFAULT 0 CHECK(price >= 0)")
         _add_column_if_missing(con, "books", "book_tag", "TEXT NOT NULL DEFAULT ''")
         _add_column_if_missing(con, "books", "code", "TEXT NOT NULL DEFAULT ''")

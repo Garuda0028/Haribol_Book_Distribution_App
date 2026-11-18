@@ -1,5 +1,6 @@
 import csv
 import math
+from contextlib import nullcontext
 from typing import Optional
 
 from .config import BOOK_CATALOGUE_PATH
@@ -67,7 +68,7 @@ def _parse_catalogue(source):
     return rows
 
 
-def merge_distribution_catalogue(rows):
+def merge_distribution_catalogue(rows, connection=None):
     now = now_iso()
     added = updated = 0
     variants_added = variants_updated = 0
@@ -81,7 +82,8 @@ def merge_distribution_catalogue(rows):
         entry["categories"].add(category)
         entry["variants"].append((language, price, points))
 
-    with connect() as con:
+    scope = connect() if connection is None else nullcontext(connection)
+    with scope as con:
         for entry in grouped.values():
             name = entry["name"]
             category = " / ".join(
@@ -257,13 +259,21 @@ def merge_distribution_catalogue(rows):
                     "UPDATE book_variants SET active=0, updated_at=? WHERE id=?",
                     (now, variant["id"]),
                 )
-    _write_catalogue_file()
-    return {
+    result = {
         "added": added,
         "updated": updated,
         "variants_added": variants_added,
         "variants_updated": variants_updated,
     }
+    if connection is None:
+        try:
+            _write_catalogue_file()
+        except OSError as exc:
+            result["catalogue_file_warning"] = (
+                "The database sync succeeded, but the local catalogue mirror "
+                f"could not be refreshed: {exc}"
+            )
+    return result
 
 
 def list_book_variants(include_inactive=False):

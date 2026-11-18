@@ -21,15 +21,61 @@ from .importer import parse_date
 from .repository import now_iso, query_df
 from .settings import get_settings
 
-RESPONSES_RANGE = "A:M"
+RESPONSES_RANGE = "A:N"
 SUBMISSIONS_RANGE = "A:J"
-LISTS_RANGE = "A:E"
+LISTS_RANGE = "A:S"
 WEBSITE_SOURCE = "IBC Sarjapur web form"
 _GOOGLE_SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets"
+_LISTS_HEADERS = (
+    "Book Category",
+    "Sub Category",
+    "Book",
+    "Language",
+    "Price",
+    "Points",
+    "Stock",
+    "Stock Value",
+    "Books Distributed",
+    "Balance Books",
+    "Amount Collected",
+    "Books Billed",
+    "Billed Amount",
+    "Books Unbilled",
+    "Unbilled Amount",
+    "Allotted Books",
+    "Allotted Books Amt",
+    "IBC-S Stock",
+    "IBC-S Stock Amt",
+)
+_LISTS_NUMERIC_FIELDS = (
+    "price",
+    "points",
+    "stock",
+    "stockvalue",
+    "booksdistributed",
+    "balancebooks",
+    "amountcollected",
+    "booksbilled",
+    "billedamount",
+    "booksunbilled",
+    "unbilledamount",
+    "allottedbooks",
+    "allottedbooksamt",
+    "ibcsstock",
+    "ibcsstockamt",
+)
+_HEADER_ALIASES = {
+    "allottedboksamt": "allottedbooksamt",
+}
 
 
 def _normalize_header(value):
     return "".join(character.lower() for character in str(value) if character.isalnum())
+
+
+def _canonical_header(value):
+    normalized = _normalize_header(value)
+    return _HEADER_ALIASES.get(normalized, normalized)
 
 
 def _spreadsheet_id(spreadsheet_config=None):
@@ -64,17 +110,25 @@ def parse_distribution_catalogue_csv(content):
     reader = csv.DictReader(io.StringIO(text, newline=""))
     if not reader.fieldnames:
         raise ValueError("The distribution catalogue CSV has no header row.")
-    columns = {_normalize_header(name): name for name in reader.fieldnames}
+    columns = {_canonical_header(name): name for name in reader.fieldnames}
     required = {"bookcategory", "book", "language", "price", "points"}
     if not required.issubset(columns):
         raise ValueError(
-            "The distribution catalogue must contain Book Category, Book, Language, Price, and Points columns."
+            "The Lists tab must contain these columns: "
+            + ", ".join(_LISTS_HEADERS)
+            + "."
         )
 
     rows = []
     seen = set()
     for row_number, row in enumerate(reader, start=2):
         category = str(row.get(columns["bookcategory"]) or "").strip()
+        subcategory_field = columns.get("subcategory")
+        subcategory = (
+            str(row.get(subcategory_field) or "").strip()
+            if subcategory_field
+            else ""
+        )
         book = str(row.get(columns["book"]) or "").strip()
         language = str(row.get(columns["language"]) or "").strip()
         if not category or not book or not language:
@@ -88,27 +142,38 @@ def parse_distribution_catalogue_csv(content):
             )
         seen.add(variant_key)
         values = []
-        for field in ("price", "points"):
-            raw_value = str(row.get(columns[field]) or "").strip()
+        for field in _LISTS_NUMERIC_FIELDS:
+            source_field = columns.get(field)
+            raw_value = str(row.get(source_field) or "").strip() if source_field else ""
             if not raw_value:
                 values.append(None)
                 continue
             numeric_value_text = raw_value.replace(",", "")
-            if field == "price":
+            if field in {
+                "price",
+                "stockvalue",
+                "amountcollected",
+                "billedamount",
+                "unbilledamount",
+                "allottedbooksamt",
+                "ibcsstockamt",
+            }:
                 numeric_value_text = numeric_value_text.replace("₹", "").strip()
             try:
-                numeric_value = float(numeric_value_text)
-            except ValueError as exc:
+                numeric_value = Decimal(numeric_value_text)
+            except InvalidOperation as exc:
                 raise ValueError(
-                    f"Distribution catalogue row {row_number}: {field.title()} must be a number."
+                    f"Lists row {row_number}: {field.title()} must be a number."
                 ) from exc
-            if not math.isfinite(numeric_value) or numeric_value < 0:
+            if not numeric_value.is_finite() or numeric_value < 0:
                 raise ValueError(
-                    f"Distribution catalogue row {row_number}: {field.title()} "
+                    f"Lists row {row_number}: {field.title()} "
                     "must be finite and non-negative."
                 )
-            values.append(numeric_value)
-        rows.append((book, category, language, *values))
+            values.append(float(numeric_value))
+        rows.append(
+            (book, category, language, values[0], values[1], subcategory, *values[2:])
+        )
 
     if not rows:
         raise ValueError("The distribution catalogue CSV contains no book rows.")
@@ -118,15 +183,12 @@ def parse_distribution_catalogue_csv(content):
 def _catalogue_records_csv(records):
     output = io.StringIO(newline="")
     writer = csv.writer(output)
-    writer.writerow(["Book Category", "Book", "Language", "Price", "Points"])
+    writer.writerow(_LISTS_HEADERS)
     for record in records:
         writer.writerow(
             [
-                record.get("bookcategory", ""),
-                record.get("book", ""),
-                record.get("language", ""),
-                record.get("price", ""),
-                record.get("points", ""),
+                record.get(_canonical_header(header), "")
+                for header in _LISTS_HEADERS
             ]
         )
     return output.getvalue().encode("utf-8")
@@ -139,7 +201,7 @@ def _fetch_distribution_catalogue_rows(
 ):
     records = _fetch_sheet_records(
         _sheet_range("lists_tab", LISTS_RANGE, spreadsheet_config),
-        {"bookcategory", "book", "language", "price", "points"},
+        {_canonical_header(header) for header in _LISTS_HEADERS},
         "Lists",
         api_key,
         service_account_info,
@@ -254,7 +316,7 @@ def _fetch_sheet_records(
             f"The {sheet_label} sheet is empty or has no header row."
         )
 
-    headers = [_normalize_header(value) for value in values[0]]
+    headers = [_canonical_header(value) for value in values[0]]
     if not required_headers.issubset(headers):
         raise ValueError(
             f"The {sheet_label} sheet is missing required columns: "
@@ -286,6 +348,7 @@ def fetch_response_sheet(
             "location",
             "date",
             "bookcategory",
+            "booksubcategory",
             "bookname",
             "language",
             "quantity",
@@ -339,11 +402,16 @@ def test_google_sheets_connection(
             "Provide a Google service-account credential before testing the connection."
         )
     tabs = (
-        ("lists_tab", "Lists", "A1:E1", {"bookcategory", "book", "language", "price", "points"}),
+        (
+            "lists_tab",
+            "Lists",
+            "A1:S1",
+            {_canonical_header(header) for header in _LISTS_HEADERS},
+        ),
         (
             "responses_tab",
             "responses",
-            "A1:M1",
+            "A1:N1",
             {
                 "submissionid",
                 "submittedat",
@@ -351,6 +419,7 @@ def test_google_sheets_connection(
                 "location",
                 "date",
                 "bookcategory",
+                "booksubcategory",
                 "bookname",
                 "language",
                 "quantity",
@@ -473,6 +542,7 @@ def import_distribution_responses(records, connection=None):
             seller = str(record.get("name") or "").strip()
             sale_date = parse_date(record.get("date"))
             category = str(record.get("bookcategory") or "").strip()
+            subcategory = str(record.get("booksubcategory") or "").strip()
             book = str(record.get("bookname") or "").strip()
             language = str(record.get("language") or "").strip()
             location = str(record.get("location") or "").strip()
@@ -539,7 +609,7 @@ def import_distribution_responses(records, connection=None):
             existing = con.execute(
                 """
                 SELECT seller_name, sale_date, book_name, language, book_category,
-                   location, quantity, form_timestamp, points, unit_price,
+                   book_sub_category, location, quantity, form_timestamp, points, unit_price,
                    amount_collected, reported_points_total
                 FROM sales WHERE row_key=?
                 """,
@@ -550,10 +620,10 @@ def import_distribution_responses(records, connection=None):
                     """
                     INSERT INTO sales
                         (row_key,form_timestamp,seller_name,sale_date,book_name,language,
-                         book_category,external_submission_id,location,remarks,points,
+                         book_category,book_sub_category,external_submission_id,location,remarks,points,
                          quantity,unit_price,amount_collected,shastra_daan,
                          reported_points_total,source_file,imported_at)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?)
                     """,
                     (
                         row_key,
@@ -563,6 +633,7 @@ def import_distribution_responses(records, connection=None):
                         book,
                         language,
                         category,
+                        subcategory,
                         submission_id,
                         location,
                         "",
@@ -584,6 +655,7 @@ def import_distribution_responses(records, connection=None):
                     book,
                     language,
                     category,
+                    subcategory,
                     location,
                     quantity,
                     points,
@@ -598,6 +670,7 @@ def import_distribution_responses(records, connection=None):
                     existing["book_name"],
                     existing["language"],
                     existing["book_category"],
+                    existing["book_sub_category"],
                     existing["location"],
                     existing["quantity"],
                     existing["points"],
@@ -610,7 +683,7 @@ def import_distribution_responses(records, connection=None):
                         """
                         UPDATE sales
                         SET form_timestamp=?, seller_name=?, sale_date=?, book_name=?,
-                            language=?, book_category=?, location=?, quantity=?,
+                            language=?, book_category=?, book_sub_category=?, location=?, quantity=?,
                             points=?, unit_price=?, amount_collected=?,
                             reported_points_total=?, imported_at=?
                         WHERE row_key=?

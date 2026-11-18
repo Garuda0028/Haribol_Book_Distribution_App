@@ -10,6 +10,11 @@ DEFAULT_GOOGLE_SHEETS_SETTINGS = {
     "responses_tab": "responses",
     "submissions_tab": "submissions",
 }
+DEFAULT_GOOGLE_SHEETS_SYNC_SETTINGS = {
+    "google_sheets_auto_sync": "1",
+    "google_sheets_sync_interval_minutes": "5",
+    "google_sheets_manual_sync": "1",
+}
 
 
 def normalize_spreadsheet_id(value):

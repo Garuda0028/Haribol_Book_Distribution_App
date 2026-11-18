@@ -4,6 +4,7 @@ from datetime import date
 from .db import connect
 from .config import (
     DEFAULT_GOOGLE_SHEETS_SETTINGS,
+    DEFAULT_GOOGLE_SHEETS_SYNC_SETTINGS,
     get_env_setting,
     normalize_spreadsheet_id,
     save_env_settings,
@@ -27,6 +28,8 @@ def get_settings():
             settings[setting_key] = configured_value
     for setting_key, default_value in DEFAULT_GOOGLE_SHEETS_SETTINGS.items():
         settings.setdefault(setting_key, default_value)
+    for setting_key, default_value in DEFAULT_GOOGLE_SHEETS_SYNC_SETTINGS.items():
+        settings.setdefault(setting_key, default_value)
     return settings
 
 def save_settings(values):
@@ -42,11 +45,45 @@ def save_settings(values):
         "responses_tab",
         "submissions_tab",
     }
-    if any(key not in env_keys and key not in google_sheet_keys for key in values):
+    sync_boolean_keys = {
+        "google_sheets_auto_sync",
+        "google_sheets_manual_sync",
+    }
+    sync_interval_key = "google_sheets_sync_interval_minutes"
+    sync_setting_keys = sync_boolean_keys | {sync_interval_key}
+    if any(
+        key not in env_keys and key not in google_sheet_keys and key not in sync_setting_keys
+        for key in values
+    ):
         raise ValueError("Only supported application settings can be saved.")
     env_values = {}
     database_values = {}
     for key, value in values.items():
+        if key in sync_boolean_keys:
+            if isinstance(value, bool):
+                database_values[key] = "1" if value else "0"
+            else:
+                normalized = str(value or "").strip().lower()
+                if normalized in {"1", "true", "yes", "on"}:
+                    database_values[key] = "1"
+                elif normalized in {"0", "false", "no", "off"}:
+                    database_values[key] = "0"
+                else:
+                    raise ValueError(f"{key} must be a boolean setting.")
+            continue
+        if key == sync_interval_key:
+            normalized_interval = str(value).strip()
+            if isinstance(value, bool) or not normalized_interval.isdecimal():
+                raise ValueError(
+                    "Google Sheets sync interval must be a whole number from 1 to 1440 minutes."
+                )
+            interval_minutes = int(normalized_interval)
+            if not 1 <= interval_minutes <= 1440:
+                raise ValueError(
+                    "Google Sheets sync interval must be between 1 and 1440 minutes."
+                )
+            database_values[key] = str(interval_minutes)
+            continue
         if key in ("spreadsheet_id", "lists_tab", "responses_tab", "submissions_tab"):
             normalized = str(value or "").strip()
             if key == "spreadsheet_id":

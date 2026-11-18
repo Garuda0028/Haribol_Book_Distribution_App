@@ -7,6 +7,22 @@ from .config import BOOK_CATALOGUE_PATH
 from .repository import execute, query_df, now_iso
 from .db import connect
 
+_INVENTORY_FIELDS = (
+    "stock",
+    "stock_value",
+    "books_distributed",
+    "balance_books",
+    "amount_collected",
+    "books_billed",
+    "billed_amount",
+    "books_unbilled",
+    "unbilled_amount",
+    "allotted_books",
+    "allotted_books_amt",
+    "ibc_s_stock",
+    "ibc_s_stock_amt",
+)
+
 def _write_catalogue_file():
     books = list_books(include_inactive=False)
     BOOK_CATALOGUE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -74,23 +90,49 @@ def merge_distribution_catalogue(rows, connection=None):
     variants_added = variants_updated = 0
     active_variant_keys = set()
     grouped = {}
-    for name, category, language, price, points in rows:
+    for row in rows:
+        if len(row) not in (5, 19):
+            raise ValueError("The catalogue row has an unexpected number of fields.")
+        name, category, language, price, points = row[:5]
+        subcategory = str(row[5] or "").strip() if len(row) == 19 else ""
+        inventory = (
+            row[6:] if len(row) == 19 else [None] * len(_INVENTORY_FIELDS)
+        )
         key = name.casefold()
         entry = grouped.setdefault(
-            key, {"name": name, "categories": set(), "variants": []}
+            key,
+            {
+                "name": name,
+                "categories": set(),
+                "variants": [],
+            },
         )
         entry["categories"].add(category)
-        entry["variants"].append((language, price, points))
+        entry["variants"].append(
+            (language, price, points, subcategory, *inventory)
+        )
 
     scope = connect() if connection is None else nullcontext(connection)
     with scope as con:
+        inventory_columns = ", ".join(_INVENTORY_FIELDS)
+        insert_columns = (
+            "book_id,language,book_category,book_sub_category,price,points,"
+            + inventory_columns
+            + ",active,updated_at"
+        )
+        insert_placeholders = (
+            ",".join("?" for _ in range(6 + len(_INVENTORY_FIELDS))) + ",1,?"
+        )
+        update_assignments = ", ".join(
+            f"{field}=?" for field in _INVENTORY_FIELDS
+        )
         for entry in grouped.values():
             name = entry["name"]
             category = " / ".join(
                 sorted(entry["categories"], key=str.casefold)
             )
             languages = sorted(
-                {language for language, _, _ in entry["variants"]},
+                {variant[0] for variant in entry["variants"]},
                 key=str.casefold,
             )
             existing = con.execute(
@@ -104,24 +146,30 @@ def merge_distribution_catalogue(rows, connection=None):
                 existing_variants = {
                     row["language"].casefold(): row
                     for row in con.execute(
-                        "SELECT language, book_category, price, points, active "
-                        "FROM book_variants "
+                        "SELECT language,book_category,book_sub_category,price,"
+                        "points," + inventory_columns + ",active FROM book_variants "
                         "WHERE book_id=?",
                         (existing["id"],),
                     )
                 }
             configured_prices = [
-                price for _, price, _ in entry["variants"] if price is not None
+                variant[1]
+                for variant in entry["variants"]
+                if variant[1] is not None
             ]
             title_price = configured_prices[0] if configured_prices else None
             title_points = next(
                 (
-                    points
-                    for language, _, points in entry["variants"]
-                    if language.casefold() == "english" and points is not None
+                    variant[2]
+                    for variant in entry["variants"]
+                    if variant[0].casefold() == "english" and variant[2] is not None
                 ),
                 next(
-                    (points for _, _, points in entry["variants"] if points is not None),
+                    (
+                        variant[2]
+                        for variant in entry["variants"]
+                        if variant[2] is not None
+                    ),
                     None,
                 ),
             )
@@ -181,7 +229,13 @@ def merge_distribution_catalogue(rows, connection=None):
                 if not is_new_book:
                     updated += 1
 
-            for language, source_price, source_points in entry["variants"]:
+            for (
+                language,
+                source_price,
+                source_points,
+                subcategory,
+                *source_inventory,
+            ) in entry["variants"]:
                 previous = existing_variants.get(language.casefold())
                 variant_price = (
                     source_price
@@ -199,19 +253,19 @@ def merge_distribution_catalogue(rows, connection=None):
                     if previous is not None
                     else new_base_points
                 )
+                inventory_values = dict(zip(_INVENTORY_FIELDS, source_inventory))
                 if previous is None:
                     con.execute(
-                        """
-                        INSERT INTO book_variants
-                            (book_id,language,book_category,price,points,active,updated_at)
-                        VALUES(?,?,?,?,?,1,?)
-                        """,
+                        f"INSERT INTO book_variants ({insert_columns}) "
+                        f"VALUES({insert_placeholders})",
                         (
                             existing["id"],
                             language,
                             category,
+                            subcategory,
                             variant_price,
                             variant_points,
+                            *(inventory_values[field] for field in _INVENTORY_FIELDS),
                             now,
                         ),
                     )
@@ -222,20 +276,26 @@ def merge_distribution_catalogue(rows, connection=None):
                         or previous["points"] != variant_points
                         or previous["language"] != language
                         or previous["book_category"] != category
+                        or previous["book_sub_category"] != subcategory
+                        or any(
+                            previous[field] != inventory_values[field]
+                            for field in _INVENTORY_FIELDS
+                        )
                         or not previous["active"]
                     ):
                         con.execute(
-                            """
-                            UPDATE book_variants
-                            SET language=?, book_category=?, price=?, points=?,
-                                active=1, updated_at=?
-                            WHERE book_id=? AND language=? COLLATE NOCASE
-                            """,
+                            "UPDATE book_variants SET "
+                            "language=?, book_category=?, book_sub_category=?, "
+                            "price=?, points=?, " + update_assignments
+                            + ", active=1, updated_at=? "
+                            "WHERE book_id=? AND language=? COLLATE NOCASE",
                             (
                                 language,
                                 category,
+                                subcategory,
                                 variant_price,
                                 variant_points,
+                                *(inventory_values[field] for field in _INVENTORY_FIELDS),
                                 now,
                                 existing["id"],
                                 previous["language"],
@@ -278,8 +338,12 @@ def merge_distribution_catalogue(rows, connection=None):
 
 def list_book_variants(include_inactive=False):
     sql = """
-        SELECT v.id, b.book_name, v.book_category, v.language, v.price, v.points,
-               v.active, v.updated_at
+        SELECT v.id, b.book_name, v.book_category, v.book_sub_category,
+               v.language, v.price, v.points, v.stock, v.stock_value,
+               v.books_distributed, v.balance_books, v.amount_collected,
+               v.books_billed, v.billed_amount, v.books_unbilled,
+               v.unbilled_amount, v.allotted_books, v.allotted_books_amt,
+               v.ibc_s_stock, v.ibc_s_stock_amt, v.active, v.updated_at
         FROM book_variants v
         JOIN books b ON b.id = v.book_id
     """

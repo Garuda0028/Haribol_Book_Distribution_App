@@ -20,8 +20,22 @@ CREATE TABLE IF NOT EXISTS book_variants (
     book_id INTEGER NOT NULL,
     language TEXT NOT NULL COLLATE NOCASE,
     book_category TEXT NOT NULL,
+    book_sub_category TEXT NOT NULL DEFAULT '',
     price REAL NOT NULL DEFAULT 0 CHECK(price >= 0),
     points REAL NOT NULL DEFAULT 1 CHECK(points >= 0),
+    stock REAL CHECK(stock IS NULL OR stock >= 0),
+    stock_value REAL CHECK(stock_value IS NULL OR stock_value >= 0),
+    books_distributed REAL CHECK(books_distributed IS NULL OR books_distributed >= 0),
+    balance_books REAL CHECK(balance_books IS NULL OR balance_books >= 0),
+    amount_collected REAL CHECK(amount_collected IS NULL OR amount_collected >= 0),
+    books_billed REAL CHECK(books_billed IS NULL OR books_billed >= 0),
+    billed_amount REAL CHECK(billed_amount IS NULL OR billed_amount >= 0),
+    books_unbilled REAL CHECK(books_unbilled IS NULL OR books_unbilled >= 0),
+    unbilled_amount REAL CHECK(unbilled_amount IS NULL OR unbilled_amount >= 0),
+    allotted_books REAL CHECK(allotted_books IS NULL OR allotted_books >= 0),
+    allotted_books_amt REAL CHECK(allotted_books_amt IS NULL OR allotted_books_amt >= 0),
+    ibc_s_stock REAL CHECK(ibc_s_stock IS NULL OR ibc_s_stock >= 0),
+    ibc_s_stock_amt REAL CHECK(ibc_s_stock_amt IS NULL OR ibc_s_stock_amt >= 0),
     active INTEGER NOT NULL DEFAULT 1,
     updated_at TEXT NOT NULL,
     UNIQUE(book_id, language),
@@ -51,6 +65,7 @@ CREATE TABLE IF NOT EXISTS sales (
     book_name TEXT NOT NULL,
     language TEXT NOT NULL DEFAULT '',
     book_category TEXT NOT NULL DEFAULT '',
+    book_sub_category TEXT NOT NULL DEFAULT '',
     external_submission_id TEXT NOT NULL DEFAULT '',
     location TEXT NOT NULL DEFAULT '',
     remarks TEXT NOT NULL DEFAULT '',
@@ -110,9 +125,27 @@ def initialize_database():
         _add_column_if_missing(con, "books", "book_tag", "TEXT NOT NULL DEFAULT ''")
         _add_column_if_missing(con, "books", "code", "TEXT NOT NULL DEFAULT ''")
         _add_column_if_missing(con, "books", "languages", "TEXT NOT NULL DEFAULT ''")
+        for column, definition in (
+            ("book_sub_category", "TEXT NOT NULL DEFAULT ''"),
+            ("stock", "REAL CHECK(stock IS NULL OR stock >= 0)"),
+            ("stock_value", "REAL CHECK(stock_value IS NULL OR stock_value >= 0)"),
+            ("books_distributed", "REAL CHECK(books_distributed IS NULL OR books_distributed >= 0)"),
+            ("balance_books", "REAL CHECK(balance_books IS NULL OR balance_books >= 0)"),
+            ("amount_collected", "REAL CHECK(amount_collected IS NULL OR amount_collected >= 0)"),
+            ("books_billed", "REAL CHECK(books_billed IS NULL OR books_billed >= 0)"),
+            ("billed_amount", "REAL CHECK(billed_amount IS NULL OR billed_amount >= 0)"),
+            ("books_unbilled", "REAL CHECK(books_unbilled IS NULL OR books_unbilled >= 0)"),
+            ("unbilled_amount", "REAL CHECK(unbilled_amount IS NULL OR unbilled_amount >= 0)"),
+            ("allotted_books", "REAL CHECK(allotted_books IS NULL OR allotted_books >= 0)"),
+            ("allotted_books_amt", "REAL CHECK(allotted_books_amt IS NULL OR allotted_books_amt >= 0)"),
+            ("ibc_s_stock", "REAL CHECK(ibc_s_stock IS NULL OR ibc_s_stock >= 0)"),
+            ("ibc_s_stock_amt", "REAL CHECK(ibc_s_stock_amt IS NULL OR ibc_s_stock_amt >= 0)"),
+        ):
+            _add_column_if_missing(con, "book_variants", column, definition)
         _add_column_if_missing(con, "sales", "quantity", "INTEGER NOT NULL DEFAULT 1 CHECK(quantity > 0)")
         _add_column_if_missing(con, "sales", "language", "TEXT NOT NULL DEFAULT ''")
         _add_column_if_missing(con, "sales", "book_category", "TEXT NOT NULL DEFAULT ''")
+        _add_column_if_missing(con, "sales", "book_sub_category", "TEXT NOT NULL DEFAULT ''")
         _add_column_if_missing(con, "sales", "external_submission_id", "TEXT NOT NULL DEFAULT ''")
         _add_column_if_missing(con, "sales", "unit_price", "REAL NOT NULL DEFAULT 0 CHECK(unit_price >= 0)")
         _add_column_if_missing(con, "sales", "location", "TEXT NOT NULL DEFAULT ''")

@@ -1,3 +1,4 @@
+import csv
 import io
 import json
 import sqlite3
@@ -23,9 +24,18 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(
             parsed,
             [
-                ("Title A", "Big Book", "English", 280.0, 2.0),
-                ("Title A", "Big Book", "Kannada", None, 2.0),
-                ("Title B", "Small Books", "Hindi", None, 0.25),
+                (
+                    "Title A", "Big Book", "English", 280.0, 2.0, "",
+                    *([None] * 13),
+                ),
+                (
+                    "Title A", "Big Book", "Kannada", None, 2.0, "",
+                    *([None] * 13),
+                ),
+                (
+                    "Title B", "Small Books", "Hindi", None, 0.25, "",
+                    *([None] * 13),
+                ),
             ],
         )
 
@@ -36,13 +46,88 @@ class IntegrationTests(unittest.TestCase):
         )
         self.assertEqual(
             parsed,
-            [("Title A", "Big Book", "English", 1280.0, 2.0)],
+            [
+                (
+                    "Title A", "Big Book", "English", 1280.0, 2.0, "",
+                    *([None] * 13),
+                )
+            ],
         )
 
         with self.assertRaisesRegex(ValueError, "Price must be a number"):
             integrations.parse_distribution_catalogue_csv(
                 "Book Category,Book,Language,Price,Points\n"
                 'Big Book,Title A,English,"₹not-a-number",2\n'.encode("utf-8")
+            )
+
+    def test_distribution_catalogue_parses_inventory_columns_and_allotted_alias(self):
+        headers = list(integrations._LISTS_HEADERS)
+        headers[16] = "Allotted Boks Amt"
+        row = [
+            "Big Book",
+            "Small Books",
+            "Title A",
+            "English",
+            "280",
+            "2",
+            "5",
+            "500",
+            "3",
+            "2",
+            "250",
+            "1",
+            "100",
+            "2",
+            "150",
+            "4",
+            "400",
+            "1",
+            "100",
+        ]
+        output = io.StringIO(newline="")
+        writer = csv.writer(output)
+        writer.writerow(headers)
+        writer.writerow(row)
+
+        parsed = integrations.parse_distribution_catalogue_csv(
+            output.getvalue().encode("utf-8")
+        )
+
+        self.assertEqual(
+            parsed,
+            [
+                (
+                    "Title A",
+                    "Big Book",
+                    "English",
+                    280.0,
+                    2.0,
+                    "Small Books",
+                    5.0,
+                    500.0,
+                    3.0,
+                    2.0,
+                    250.0,
+                    1.0,
+                    100.0,
+                    2.0,
+                    150.0,
+                    4.0,
+                    400.0,
+                    1.0,
+                    100.0,
+                )
+            ],
+        )
+
+        row[6] = "-1"
+        output = io.StringIO(newline="")
+        writer = csv.writer(output)
+        writer.writerow(headers)
+        writer.writerow(row)
+        with self.assertRaisesRegex(ValueError, "Stock must be finite and non-negative"):
+            integrations.parse_distribution_catalogue_csv(
+                output.getvalue().encode("utf-8")
             )
 
     def test_catalogue_sync_reads_configured_lists_tab_with_api_key(self):
@@ -79,8 +164,8 @@ class IntegrationTests(unittest.TestCase):
             )
 
         fetch.assert_called_once_with(
-            "'Book Lists'!A:E",
-            {"bookcategory", "book", "language", "price", "points"},
+            "'Book Lists'!A:S",
+            {integrations._canonical_header(header) for header in integrations._LISTS_HEADERS},
             "Lists",
             "test-key",
             None,
@@ -88,7 +173,17 @@ class IntegrationTests(unittest.TestCase):
         )
         self.assertEqual(
             merge.call_args.args[0],
-            [("Title A", "Big Book", "English", 280.0, 2.0)],
+            [
+                (
+                    "Title A",
+                    "Big Book",
+                    "English",
+                    280.0,
+                    2.0,
+                    "",
+                    *([None] * 13),
+                )
+            ],
         )
         self.assertEqual(result, {"added": 1})
 
@@ -143,12 +238,20 @@ class IntegrationTests(unittest.TestCase):
         )
         self.assertEqual(fetch.call_count, 3)
         self.assertEqual(
+            fetch.call_args_list[0].args[1],
+            {
+                integrations._canonical_header(header)
+                for header in integrations._LISTS_HEADERS
+            },
+        )
+        self.assertIn("booksubcategory", fetch.call_args_list[1].args[1])
+        self.assertEqual(
             fetch.call_args_list[0].args[0],
-            "'Books'!A1:E1",
+            "'Books'!A1:S1",
         )
         self.assertEqual(
             fetch.call_args_list[1].args[0],
-            "'Website responses'!A1:M1",
+            "'Website responses'!A1:N1",
         )
         self.assertEqual(
             fetch.call_args_list[2].args[0],
@@ -188,14 +291,23 @@ class IntegrationTests(unittest.TestCase):
             );
             CREATE TABLE book_variants (
                 id INTEGER PRIMARY KEY, book_id INTEGER, language TEXT COLLATE NOCASE,
-                book_category TEXT, price REAL, points REAL, active INTEGER,
+                book_category TEXT, book_sub_category TEXT, price REAL, points REAL,
+                stock REAL, stock_value REAL, books_distributed REAL,
+                balance_books REAL, amount_collected REAL, books_billed REAL,
+                billed_amount REAL, books_unbilled REAL, unbilled_amount REAL,
+                allotted_books REAL, allotted_books_amt REAL, ibc_s_stock REAL,
+                ibc_s_stock_amt REAL, active INTEGER,
                 updated_at TEXT, UNIQUE(book_id, language)
             );
             """
         )
+        inventory = [
+            5.0, 500.0, 3.0, 2.0, 250.0, 1.0, 100.0,
+            2.0, 150.0, 4.0, 400.0, 1.0, 100.0,
+        ]
         rows = [
-            ("Title A", "Big Book", "English", 280.0, 2.0),
-            ("Title A", "Big Book", "Kannada", None, 2.0),
+            ("Title A", "Big Book", "English", 280.0, 2.0, "Small Books", *inventory),
+            ("Title A", "Big Book", "Kannada", None, 2.0, "Small Books", *inventory),
         ]
         try:
             with (
@@ -206,19 +318,23 @@ class IntegrationTests(unittest.TestCase):
                 unchanged = catalogue.merge_distribution_catalogue(rows)
                 updated = catalogue.merge_distribution_catalogue(
                     [
-                        ("Title A", "Big Book", "English", 300.0, 3.0),
-                        ("Title A", "Big Book", "Kannada", None, 2.0),
+                        ("Title A", "Big Book", "English", 300.0, 3.0, "Small Books", *inventory),
+                        ("Title A", "Big Book", "Kannada", None, 2.0, "Small Books", *inventory),
                     ]
                 )
             variants = connection.execute(
-                "SELECT language, price, points FROM book_variants ORDER BY language"
+                "SELECT language, price, points, book_sub_category, stock, "
+                "stock_value, ibc_s_stock_amt FROM book_variants ORDER BY language"
             ).fetchall()
             self.assertEqual(initial["variants_added"], 2)
             self.assertEqual(unchanged["variants_updated"], 0)
             self.assertEqual(updated["variants_updated"], 2)
             self.assertEqual(
                 [tuple(row) for row in variants],
-                [("English", 300.0, 3.0), ("Kannada", 300.0, 2.0)],
+                [
+                    ("English", 300.0, 3.0, "Small Books", 5.0, 500.0, 100.0),
+                    ("Kannada", 300.0, 2.0, "Small Books", 5.0, 500.0, 100.0),
+                ],
             )
         finally:
             connection.close()
@@ -233,6 +349,7 @@ class IntegrationTests(unittest.TestCase):
                     "location",
                     "date",
                     "book_category",
+                    "book_sub_category",
                     "book_name",
                     "language",
                     "quantity",
@@ -248,6 +365,7 @@ class IntegrationTests(unittest.TestCase):
                     "",
                     "2026-11-13",
                     "Big Book",
+                    "Small books",
                     "Title",
                     "English",
                     "2",
@@ -286,6 +404,7 @@ class IntegrationTests(unittest.TestCase):
 
         self.assertEqual(rows[0]["submissionid"], "sub-1")
         self.assertEqual(rows[0]["bookname"], "Title")
+        self.assertEqual(rows[0]["booksubcategory"], "Small books")
         self.assertIn("key=test-key", urlopen.call_args.args[0].full_url)
 
     def test_sheet_fetch_uses_resolved_spreadsheet_id(self):
@@ -312,7 +431,7 @@ class IntegrationTests(unittest.TestCase):
             ) as urlopen,
         ):
             rows = integrations._fetch_sheet_records(
-                "responses!A:M",
+                "responses!A:N",
                 set(),
                 "responses",
                 api_key="test-key",
@@ -320,7 +439,7 @@ class IntegrationTests(unittest.TestCase):
 
         self.assertEqual(rows, [])
         self.assertIn(
-            "/configured-sheet/values/responses!A:M",
+            "/configured-sheet/values/responses!A:N",
             urlopen.call_args.args[0].full_url,
         )
 
@@ -345,7 +464,7 @@ class IntegrationTests(unittest.TestCase):
                 "shared with the service-account email as Viewer",
             ) as context:
                 integrations._fetch_sheet_records(
-                    "responses!A:M",
+                    "responses!A:N",
                     set(),
                     "responses",
                     api_key="test-key",
@@ -374,7 +493,7 @@ class IntegrationTests(unittest.TestCase):
             CREATE TABLE sales (
                 row_key TEXT UNIQUE, form_timestamp TEXT, seller_name TEXT,
                 sale_date TEXT, book_name TEXT, language TEXT, book_category TEXT,
-                external_submission_id TEXT, location TEXT,
+                book_sub_category TEXT, external_submission_id TEXT, location TEXT,
                 remarks TEXT, points REAL, quantity INTEGER, unit_price REAL,
                 amount_collected REAL, shastra_daan REAL,
                 reported_points_total REAL, source_file TEXT, imported_at TEXT
@@ -394,6 +513,7 @@ class IntegrationTests(unittest.TestCase):
                 "location": "Sarjapur",
                 "date": "2026-11-13",
                 "bookcategory": "Big Book",
+                "booksubcategory": "Small books",
                 "bookname": "Title",
                 "language": "Kannada",
                 "quantity": "2",
@@ -425,7 +545,7 @@ class IntegrationTests(unittest.TestCase):
                 third = integrations.import_distribution_responses(changed_records)
 
             saved = connection.execute(
-                "SELECT language, book_category, external_submission_id, location, quantity, "
+                "SELECT language, book_category, book_sub_category, external_submission_id, location, quantity, "
                 "points, unit_price, amount_collected, reported_points_total, source_file "
                 "FROM sales"
             ).fetchone()
@@ -437,6 +557,7 @@ class IntegrationTests(unittest.TestCase):
                 (
                     "Kannada",
                     "Big Book",
+                    "Small books",
                     "sub-1",
                     "Updated location",
                     3,
@@ -511,7 +632,12 @@ class IntegrationTests(unittest.TestCase):
             CREATE TABLE book_variants (
                 id INTEGER PRIMARY KEY, book_id INTEGER,
                 language TEXT COLLATE NOCASE, book_category TEXT,
-                price REAL, points REAL, active INTEGER, updated_at TEXT,
+                book_sub_category TEXT, price REAL, points REAL, stock REAL,
+                stock_value REAL, books_distributed REAL, balance_books REAL,
+                amount_collected REAL, books_billed REAL, billed_amount REAL,
+                books_unbilled REAL, unbilled_amount REAL, allotted_books REAL,
+                allotted_books_amt REAL, ibc_s_stock REAL, ibc_s_stock_amt REAL,
+                active INTEGER, updated_at TEXT,
                 UNIQUE(book_id, language)
             );
             CREATE TABLE sellers (
@@ -522,6 +648,7 @@ class IntegrationTests(unittest.TestCase):
                 id INTEGER PRIMARY KEY, row_key TEXT UNIQUE,
                 form_timestamp TEXT, seller_name TEXT, sale_date TEXT,
                 book_name TEXT, language TEXT, book_category TEXT,
+                book_sub_category TEXT,
                 external_submission_id TEXT, location TEXT, remarks TEXT,
                 points REAL, quantity INTEGER, unit_price REAL,
                 amount_collected REAL, shastra_daan REAL,

@@ -301,9 +301,10 @@ def _serve():
 
 def _render_app():
 
-    from datetime import date, timedelta
+    from datetime import date, datetime, timedelta
 
     import sqlite3
+    import threading
     import streamlit as st
 
     from book_sales.config import (
@@ -561,6 +562,177 @@ def _render_app():
     def _google_sheet_credentials():
         return load_google_service_account(st.secrets)
 
+    def _google_sync_setting_enabled(settings, key):
+        return str(settings.get(key, "1")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    @st.cache_resource
+    def _google_sync_runtime():
+        return {
+            "lock": threading.Lock(),
+            "last_attempt_monotonic": None,
+            "last_success_at": None,
+            "last_config_fingerprint": None,
+            "last_error": None,
+            "waiting_for_credentials": False,
+            "last_warning": None,
+        }
+
+    def _run_google_sync(
+        sync_action,
+        record_full_sync=False,
+        config_fingerprint=None,
+    ):
+        runtime = _google_sync_runtime()
+        if not runtime["lock"].acquire(blocking=False):
+            raise ValueError(
+                "Another Google Sheets sync is already running. Try again when it finishes."
+            )
+        try:
+            result = sync_action()
+            if record_full_sync:
+                _record_full_sync_success(
+                    result,
+                    config_fingerprint=config_fingerprint,
+                )
+            return result
+        finally:
+            runtime["lock"].release()
+
+    def _record_full_sync_success(result, config_fingerprint=None):
+        runtime = _google_sync_runtime()
+        runtime["last_attempt_monotonic"] = time.monotonic()
+        runtime["last_success_at"] = datetime.now().astimezone().strftime(
+            "%Y-%m-%d %H:%M:%S %Z"
+        )
+        runtime["last_config_fingerprint"] = (
+            config_fingerprint
+            if config_fingerprint is not None
+            else _google_sheet_config_fingerprint(_google_sheet_config())
+        )
+        runtime["last_error"] = None
+        runtime["waiting_for_credentials"] = False
+        runtime["last_warning"] = result.get("catalogue_file_warning")
+
+    def _render_google_sheets_auto_sync():
+        sync_settings = get_settings()
+        auto_sync_enabled = _google_sync_setting_enabled(
+            sync_settings, "google_sheets_auto_sync"
+        )
+        interval_minutes = int(
+            sync_settings.get("google_sheets_sync_interval_minutes", "5")
+        )
+
+        @st.fragment(
+            run_every=interval_minutes * 60 if auto_sync_enabled else None
+        )
+        def _auto_sync_fragment():
+            current_settings = get_settings()
+            if not _google_sync_setting_enabled(
+                current_settings, "google_sheets_auto_sync"
+            ):
+                st.caption(
+                    "Automatic Google Sheets sync is disabled. Change this in "
+                    "Settings → Google Sheets sync schedule."
+                )
+                return
+
+            current_interval = int(
+                current_settings.get("google_sheets_sync_interval_minutes", "5")
+            )
+            spreadsheet_config = _google_sheet_config()
+            config_fingerprint = _google_sheet_config_fingerprint(
+                spreadsheet_config
+            )
+            runtime = _google_sync_runtime()
+            if not spreadsheet_config["spreadsheet_id"]:
+                runtime["last_attempt_monotonic"] = time.monotonic()
+                runtime["last_config_fingerprint"] = config_fingerprint
+                runtime["last_error"] = None
+                runtime["waiting_for_credentials"] = False
+                st.caption(
+                    "Automatic sync is enabled. Configure a spreadsheet ID and tab "
+                    "names in Settings → Google Sheets connection to begin."
+                )
+                return
+            now = time.monotonic()
+            last_attempt = runtime["last_attempt_monotonic"]
+            due = (
+                last_attempt is None
+                or runtime["last_config_fingerprint"] != config_fingerprint
+                or runtime["waiting_for_credentials"]
+                or now - last_attempt >= current_interval * 60
+            )
+            if due and runtime["lock"].acquire(blocking=False):
+                try:
+                    now = time.monotonic()
+                    last_attempt = runtime["last_attempt_monotonic"]
+                    due = (
+                        last_attempt is None
+                        or runtime["last_config_fingerprint"] != config_fingerprint
+                        or runtime["waiting_for_credentials"]
+                        or now - last_attempt >= current_interval * 60
+                    )
+                    if due:
+                        runtime["last_attempt_monotonic"] = now
+                        runtime["last_config_fingerprint"] = config_fingerprint
+                        runtime["last_error"] = None
+                        runtime["waiting_for_credentials"] = False
+                        try:
+                            service_account_info = _google_sheet_credentials()
+                            if not service_account_info:
+                                runtime["waiting_for_credentials"] = True
+                            else:
+                                result = sync_distribution_responses(
+                                    service_account_info=service_account_info,
+                                    spreadsheet_config=spreadsheet_config,
+                                )
+                                _record_full_sync_success(
+                                    result,
+                                    config_fingerprint=config_fingerprint,
+                                )
+                                st.rerun(scope="app")
+                        except (ValueError, OSError, sqlite3.Error) as exc:
+                            runtime["last_error"] = str(exc)
+                finally:
+                    runtime["lock"].release()
+
+            runtime = _google_sync_runtime()
+            if runtime["last_error"]:
+                st.error(
+                    "Automatic Google Sheets sync failed. The app will retry after "
+                    f"{current_interval} minutes: {runtime['last_error']}"
+                )
+            elif runtime["waiting_for_credentials"]:
+                st.caption(
+                    "Automatic sync is enabled, but is waiting for "
+                    "[google_service_account] in Streamlit Secrets."
+                )
+            elif runtime["last_warning"]:
+                st.warning(
+                    f"Google Sheets data synced; catalogue file warning: "
+                    f"{runtime['last_warning']}"
+                )
+            elif runtime["last_success_at"]:
+                st.caption(
+                    f"All configured Google Sheets tabs last synced at "
+                    f"{runtime['last_success_at']}. Automatic sync runs every "
+                    f"{current_interval} minutes while a dashboard session is open."
+                )
+            else:
+                st.caption(
+                    "Automatic sync will run immediately when credentials are "
+                    "and a spreadsheet are configured, then every "
+                    f"{current_interval} minutes while a "
+                    "dashboard session is open."
+                )
+
+        _auto_sync_fragment()
+
 
     def _google_sheet_config_fingerprint(config):
         serialized = json.dumps(config, sort_keys=True, separators=(",", ":"))
@@ -666,6 +838,7 @@ def _render_app():
                 "location": "Location",
                 "book_name": "Book",
                 "book_category": "Book category",
+                "book_sub_category": "Book subcategory",
                 "language": "Language",
                 "quantity": "Copies",
                 "points": "Points per copy",
@@ -954,48 +1127,67 @@ def _render_app():
                 "validated before any local changes are committed."
             )
             _render_secure_action_feedback()
-            try:
-                service_account_info = _google_sheet_credentials()
-            except ValueError as exc:
-                service_account_info = None
-                st.error(f"Invalid Google service-account secret: {exc}")
-            if not service_account_info:
-                st.info(
-                    "Configure [google_service_account] in Streamlit Secrets before syncing."
+            sync_settings = get_settings()
+            if not _google_sync_setting_enabled(
+                sync_settings, "google_sheets_manual_sync"
+            ):
+                st.caption(
+                    "Manual sync is disabled. Enable it in Settings → Google Sheets "
+                    "sync schedule."
                 )
             else:
-                with st.form("website_response_sync_form"):
-                    sync_requested = st.form_submit_button(
-                        "Sync website responses now",
-                        type="primary",
+                try:
+                    service_account_info = _google_sheet_credentials()
+                except ValueError as exc:
+                    service_account_info = None
+                    st.error(f"Invalid Google service-account secret: {exc}")
+                if not service_account_info:
+                    st.info(
+                        "Configure [google_service_account] in Streamlit Secrets before syncing."
                     )
-                if sync_requested:
-                    try:
-                        result = sync_distribution_responses(
-                            service_account_info=service_account_info,
-                            spreadsheet_config=_google_sheet_config(),
+                else:
+                    with st.form("website_response_sync_form"):
+                        sync_requested = st.form_submit_button(
+                            "Sync website responses now",
+                            type="primary",
                         )
-                        st.session_state.website_responses_last_sync = time.monotonic()
-                        _secure_action_feedback(
-                            f"Sync complete: {result['added']} added, "
-                            f"{result['updated']} updated, "
-                            f"{result['duplicates']} unchanged. Catalogue: "
-                            f"{result['catalogue_added']} new title(s), "
-                            f"{result['catalogue_updated']} updated; summaries: "
-                            f"{result['submissions_added']} new, "
-                            f"{result['submissions_updated']} updated."
-                            + (
-                                f" {result['catalogue_file_warning']}"
-                                if result.get("catalogue_file_warning")
-                                else ""
-                            ),
-                            is_warning=bool(result.get("catalogue_file_warning")),
-                        )
-                    except (ValueError, OSError, sqlite3.Error) as exc:
-                        _secure_action_feedback(
-                            f"Could not sync website responses: {exc}",
-                            is_error=True,
-                        )
+                    if sync_requested:
+                        try:
+                            spreadsheet_config = _google_sheet_config()
+                            config_fingerprint = _google_sheet_config_fingerprint(
+                                spreadsheet_config
+                            )
+                            result = _run_google_sync(
+                                lambda: sync_distribution_responses(
+                                    service_account_info=service_account_info,
+                                    spreadsheet_config=spreadsheet_config,
+                                ),
+                                record_full_sync=True,
+                                config_fingerprint=config_fingerprint,
+                            )
+                            st.session_state.website_responses_last_sync = (
+                                time.monotonic()
+                            )
+                            _secure_action_feedback(
+                                f"Sync complete: {result['added']} added, "
+                                f"{result['updated']} updated, "
+                                f"{result['duplicates']} unchanged. Catalogue: "
+                                f"{result['catalogue_added']} new title(s), "
+                                f"{result['catalogue_updated']} updated; summaries: "
+                                f"{result['submissions_added']} new, "
+                                f"{result['submissions_updated']} updated."
+                                + (
+                                    f" {result['catalogue_file_warning']}"
+                                    if result.get("catalogue_file_warning")
+                                    else ""
+                                ),
+                                is_warning=bool(result.get("catalogue_file_warning")),
+                            )
+                        except (ValueError, OSError, sqlite3.Error) as exc:
+                            _secure_action_feedback(
+                                f"Could not sync website responses: {exc}",
+                                is_error=True,
+                            )
 
             last_sync = st.session_state.get("website_responses_last_sync")
             if last_sync is not None:
@@ -1064,78 +1256,148 @@ def _render_app():
         _page_heading(
             "Books & values",
             "Book catalogue",
-            "Browse book categories, languages, prices, and points synced from the spreadsheet.",
+            "Browse book categories, prices, points, and inventory synced from the spreadsheet.",
         )
         st.caption(
             "The Google Sheet is the source of truth. Update its Lists tab to change the "
-            "catalogue; this page is read-only. Sync is manual and uses the Google service "
-            "account configured in Streamlit Secrets."
+            "catalogue and inventory; this page is read-only. The full workbook sync runs "
+            "automatically on the configured schedule. Manual refresh uses the Google "
+            "service account configured in Streamlit Secrets."
         )
         _render_secure_action_feedback()
-        try:
-            service_account_info = _google_sheet_credentials()
-        except ValueError as exc:
-            service_account_info = None
-            st.error(f"Invalid Google service-account secret: {exc}")
-        if service_account_info:
-            with st.form("catalogue_sync_form"):
-                sync_requested = st.form_submit_button(
-                    "Sync book list from Google Sheet",
-                    type="primary",
-                )
-            if sync_requested:
-                try:
-                    result = sync_distribution_catalogue(
-                        service_account_info=service_account_info,
-                        spreadsheet_config=_google_sheet_config(),
-                    )
-                    st.session_state.book_catalogue_last_sync = time.monotonic()
-                    _secure_action_feedback(
-                        f"Catalogue sync complete: {result['added']} new title(s), "
-                        f"{result['updated']} title(s) updated; "
-                        f"{result['variants_added']} new language variant(s), "
-                        f"{result['variants_updated']} updated."
-                        + (
-                            f" {result['catalogue_file_warning']}"
-                            if result.get("catalogue_file_warning")
-                            else ""
-                        ),
-                        is_warning=bool(result.get("catalogue_file_warning")),
-                    )
-                except (ValueError, OSError, sqlite3.Error) as exc:
-                    _secure_action_feedback(
-                        f"Could not sync the book list: {exc}",
-                        is_error=True,
-                    )
-        else:
-            st.info(
-                "Configure [google_service_account] in Streamlit Secrets before syncing."
+        sync_settings = get_settings()
+        if not _google_sync_setting_enabled(sync_settings, "google_sheets_manual_sync"):
+            st.caption(
+                "Manual sync is disabled. Enable it in Settings → Google Sheets "
+                "sync schedule."
             )
+        else:
+            try:
+                service_account_info = _google_sheet_credentials()
+            except ValueError as exc:
+                service_account_info = None
+                st.error(f"Invalid Google service-account secret: {exc}")
+            if service_account_info:
+                with st.form("catalogue_sync_form"):
+                    sync_requested = st.form_submit_button(
+                        "Sync book list from Google Sheet",
+                        type="primary",
+                    )
+                if sync_requested:
+                    try:
+                        result = _run_google_sync(
+                            lambda: sync_distribution_catalogue(
+                                service_account_info=service_account_info,
+                                spreadsheet_config=_google_sheet_config(),
+                            )
+                        )
+                        st.session_state.book_catalogue_last_sync = time.monotonic()
+                        _secure_action_feedback(
+                            f"Catalogue sync complete: {result['added']} new title(s), "
+                            f"{result['updated']} title(s) updated; "
+                            f"{result['variants_added']} new language variant(s), "
+                            f"{result['variants_updated']} updated."
+                            + (
+                                f" {result['catalogue_file_warning']}"
+                                if result.get("catalogue_file_warning")
+                                else ""
+                            ),
+                            is_warning=bool(result.get("catalogue_file_warning")),
+                        )
+                    except (ValueError, OSError, sqlite3.Error) as exc:
+                        _secure_action_feedback(
+                            f"Could not sync the book list: {exc}",
+                            is_error=True,
+                        )
+            else:
+                st.info(
+                    "Configure [google_service_account] in Streamlit Secrets before syncing."
+                )
 
         variants = list_book_variants(include_inactive=True)
-        st.markdown("#### Catalogue from spreadsheet")
+        st.markdown("#### Catalogue and inventory from spreadsheet")
         if variants.empty:
-            st.info("Sync the spreadsheet to load book languages, prices, and points.")
+            st.info("Sync the spreadsheet to load book and inventory details.")
         else:
             variants = variants.rename(
                 columns={
                     "book_name": "Book",
                     "book_category": "Category",
+                    "book_sub_category": "Subcategory",
                     "language": "Language",
                     "price": "Price (₹)",
                     "points": "Points",
+                    "stock": "Stock",
+                    "stock_value": "Stock value (₹)",
+                    "books_distributed": "Books distributed",
+                    "balance_books": "Balance books",
+                    "amount_collected": "Amount collected (₹)",
+                    "books_billed": "Books billed",
+                    "billed_amount": "Billed amount (₹)",
+                    "books_unbilled": "Books unbilled",
+                    "unbilled_amount": "Unbilled amount (₹)",
+                    "allotted_books": "Allotted books",
+                    "allotted_books_amt": "Allotted books amount (₹)",
+                    "ibc_s_stock": "IBC-S stock",
+                    "ibc_s_stock_amt": "IBC-S stock amount (₹)",
                     "active": "In sheet",
                     "updated_at": "Synced at",
                 }
+            )
+            st.markdown("#### Inventory snapshot")
+            active_variants = variants[variants["In sheet"] == 1]
+            inventory_metrics = (
+                ("Total stock", "Stock", "count"),
+                ("Stock value", "Stock value (₹)", "currency"),
+                ("Books distributed", "Books distributed", "count"),
+                ("Balance books", "Balance books", "count"),
+            )
+            missing_metric_values = False
+            for column, (label, field, value_type) in zip(
+                st.columns(len(inventory_metrics)),
+                inventory_metrics,
+            ):
+                field_values = active_variants[field]
+                if field_values.empty or field_values.isna().any():
+                    formatted_value = "—"
+                    missing_metric_values = True
+                else:
+                    value = field_values.sum()
+                    if value_type == "currency":
+                        formatted_value = f"₹{value:,.2f}"
+                    else:
+                        formatted_value = f"{value:,.0f}"
+                column.metric(label, formatted_value)
+            if missing_metric_values:
+                st.caption(
+                    "Summary cards show a dash when an active Lists row has a blank "
+                    "inventory value; fill the sheet to get a complete total."
+                )
+            st.caption(
+                "Inventory and billing totals below are read from the configured Lists tab."
             )
             st.dataframe(
                 variants[
                     [
                         "Book",
                         "Category",
+                        "Subcategory",
                         "Language",
                         "Price (₹)",
                         "Points",
+                        "Stock",
+                        "Stock value (₹)",
+                        "Books distributed",
+                        "Balance books",
+                        "Amount collected (₹)",
+                        "Books billed",
+                        "Billed amount (₹)",
+                        "Books unbilled",
+                        "Unbilled amount (₹)",
+                        "Allotted books",
+                        "Allotted books amount (₹)",
+                        "IBC-S stock",
+                        "IBC-S stock amount (₹)",
                         "In sheet",
                         "Synced at",
                     ]
@@ -1216,7 +1478,11 @@ def _render_app():
 
 
     def _render_settings():
-        _page_heading("Preferences & data", "Settings", "Manage targets, catalogue sync, file naming, and backups.")
+        _page_heading(
+            "Preferences & data",
+            "Settings",
+            "Manage targets, Google Sheets sync, preferences, and backups.",
+        )
         settings = get_settings()
         with st.expander("Targets and import preferences", expanded=True):
             target_start_date_enabled = st.checkbox(
@@ -1290,6 +1556,63 @@ def _render_app():
                         st.rerun()
                     except (ValueError, OSError) as exc:
                         st.error(f"Could not save preferences: {exc}")
+
+        with st.expander("Google Sheets sync schedule", expanded=True):
+            sync_settings = get_settings()
+            with st.form("google_sheets_sync_schedule_form"):
+                auto_sync_enabled = st.checkbox(
+                    "Automatically sync all configured tabs",
+                    value=_google_sync_setting_enabled(
+                        sync_settings, "google_sheets_auto_sync"
+                    ),
+                    help=(
+                        "A full sync reads the Lists, responses, and submissions tabs, "
+                        "validates the data, then applies it in one database transaction."
+                    ),
+                )
+                sync_interval_minutes = st.number_input(
+                    "Automatic sync interval (minutes)",
+                    min_value=1,
+                    max_value=1440,
+                    value=int(
+                        sync_settings.get(
+                            "google_sheets_sync_interval_minutes", "5"
+                        )
+                    ),
+                    step=1,
+                    disabled=not auto_sync_enabled,
+                    help="Allowed interval: 1 to 1440 minutes. The default is 5 minutes.",
+                )
+                manual_sync_enabled = st.checkbox(
+                    "Allow manual sync from the catalogue and responses pages",
+                    value=_google_sync_setting_enabled(
+                        sync_settings, "google_sheets_manual_sync"
+                    ),
+                )
+                st.caption(
+                    "Automatic sync runs immediately when the first dashboard session "
+                    "opens, then on the selected interval while a dashboard session is "
+                    "open. It pauses when there are no active sessions. Manual sync is "
+                    "controlled independently."
+                )
+                save_sync_schedule = st.form_submit_button(
+                    "Save sync schedule",
+                    type="primary",
+                )
+            if save_sync_schedule:
+                try:
+                    save_settings(
+                        {
+                            "google_sheets_auto_sync": auto_sync_enabled,
+                            "google_sheets_sync_interval_minutes": int(
+                                sync_interval_minutes
+                            ),
+                            "google_sheets_manual_sync": manual_sync_enabled,
+                        }
+                    )
+                    _secure_action_feedback("Google Sheets sync schedule saved.")
+                except (ValueError, OSError, sqlite3.Error) as exc:
+                    st.error(f"Could not save the sync schedule: {exc}")
 
         with st.expander("Google Sheets connection", expanded=True):
             st.info(
@@ -1494,6 +1817,7 @@ def _render_app():
 
 
     active_page = _sidebar_navigation()
+    _render_google_sheets_auto_sync()
     if active_page == "Overview":
         _render_overview()
     elif active_page == "Sales records":

@@ -595,7 +595,7 @@ class IntegrationTests(unittest.TestCase):
             "totalcopies": "3",
             "totalpoints": "4.5",
             "lakshmidue": "200",
-            "lakshmitransferred": "100",
+            "lakshmitransferred": 0,
             "shastradaan": "50",
         }
         try:
@@ -615,9 +615,21 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual((first["added"], first["invalid"]), (1, 0))
             self.assertEqual((unchanged["added"], unchanged["unchanged"]), (0, 1))
             self.assertEqual((updated["updated"], updated["unchanged"]), (1, 0))
-            self.assertEqual(tuple(saved), ("sub-1", 3, 5.0, 200.0, 100.0, 50.0))
+            self.assertEqual(tuple(saved), ("sub-1", 3, 5.0, 200.0, 0.0, 50.0))
         finally:
             connection.close()
+
+    def test_sheet_number_preserves_numeric_zero_and_only_treats_blank_as_blank(self):
+        self.assertEqual(integrations._sheet_number(0, "amount", 2), 0.0)
+        self.assertEqual(
+            integrations._sheet_number(0, "amount", 2, allow_blank=True),
+            0.0,
+        )
+        self.assertIsNone(
+            integrations._sheet_number(None, "amount", 2, allow_blank=True)
+        )
+        with self.assertRaisesRegex(ValueError, "must be a number"):
+            integrations._sheet_number(None, "amount", 2)
 
     def test_full_sync_rolls_back_catalogue_and_responses_on_invalid_summary(self):
         connection = sqlite3.connect(":memory:")

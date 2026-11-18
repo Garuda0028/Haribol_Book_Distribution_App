@@ -471,7 +471,7 @@ def test_google_sheets_connection(
 
 
 def _sheet_number(value, field, row_number, allow_blank=False):
-    raw_value = str(value or "").strip()
+    raw_value = "" if value is None else str(value).strip()
     if not raw_value and allow_blank:
         return None
     try:

@@ -3,30 +3,27 @@ import hashlib
 import io
 import json
 import math
-import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import nullcontext
 from decimal import Decimal, InvalidOperation
 
 from .catalogue import (
+    _write_catalogue_file,
     get_book_pricing_catalogue,
     get_book_variant_pricing_catalogue,
     merge_distribution_catalogue,
 )
+from .config import normalize_spreadsheet_id
 from .db import connect
 from .importer import parse_date
 from .repository import now_iso, query_df
 from .settings import get_settings
 
-SPREADSHEET_ID = "1dztK02kAIqPI1_L-XMpIwAWoNEH6qLQh1vp7FkeNQEQ"
-CATALOGUE_CSV_URL = (
-    f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/export"
-    "?format=csv&gid=2035992438"
-)
-RESPONSES_RANGE = "responses!A:M"
-SUBMISSIONS_RANGE = "submissions!A:J"
-LISTS_RANGE = "Lists!A:E"
+RESPONSES_RANGE = "A:M"
+SUBMISSIONS_RANGE = "A:J"
+LISTS_RANGE = "A:E"
 WEBSITE_SOURCE = "IBC Sarjapur web form"
 _GOOGLE_SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets"
 
@@ -35,27 +32,27 @@ def _normalize_header(value):
     return "".join(character.lower() for character in str(value) if character.isalnum())
 
 
-def _spreadsheet_id(service_account_info=None):
-    spreadsheet_url = str(
-        (service_account_info or {}).get("spreadsheet") or ""
-    ).strip()
-    if not spreadsheet_url:
-        return SPREADSHEET_ID
+def _spreadsheet_id(spreadsheet_config=None):
+    settings = spreadsheet_config or get_settings()
+    return normalize_spreadsheet_id(settings.get("spreadsheet_id"))
 
-    parsed_url = urllib.parse.urlparse(spreadsheet_url)
-    path_parts = parsed_url.path.strip("/").split("/")
+
+def _sheet_range(tab_key, columns, spreadsheet_config=None):
+    settings = spreadsheet_config or get_settings()
+    tab_name = str(settings.get(tab_key) or "").strip()
     if (
-        parsed_url.scheme != "https"
-        or parsed_url.hostname != "docs.google.com"
-        or len(path_parts) < 3
-        or path_parts[:2] != ["spreadsheets", "d"]
-        or not path_parts[2]
-        or not re.fullmatch(r"[A-Za-z0-9_-]+", path_parts[2])
+        not tab_name
+        or len(tab_name) > 100
+        or "\n" in tab_name
+        or "\r" in tab_name
     ):
-        raise ValueError(
-            "The google_service_account.spreadsheet value must be a Google Sheets URL."
-        )
-    return path_parts[2]
+        raise ValueError(f"Configure a valid {tab_key.replace('_', ' ')} name.")
+    quoted_tab = "'" + tab_name.replace("'", "''") + "'"
+    return f"{quoted_tab}!{columns}"
+
+
+def _connection_scope(connection):
+    return nullcontext(connection) if connection is not None else connect()
 
 
 def parse_distribution_catalogue_csv(content):
@@ -135,31 +132,35 @@ def _catalogue_records_csv(records):
     return output.getvalue().encode("utf-8")
 
 
-def sync_distribution_catalogue(api_key=None, service_account_info=None):
-    if api_key or service_account_info:
-        records = _fetch_sheet_records(
-            LISTS_RANGE,
-            {"bookcategory", "book", "language", "price", "points"},
-            "Lists",
-            api_key,
-            service_account_info,
-        )
-        content = _catalogue_records_csv(records)
-    else:
-        request = urllib.request.Request(
-            CATALOGUE_CSV_URL,
-            headers={"User-Agent": "HaribolBookDistribution/1.0"},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=15) as response:
-                content = response.read(2_000_001)
-        except (OSError, urllib.error.URLError, urllib.error.HTTPError) as exc:
-            raise ValueError(
-                f"Could not download the distribution catalogue: {exc}"
-            ) from exc
-        if len(content) > 2_000_000:
-            raise ValueError("The distribution catalogue CSV must be 2 MB or smaller.")
-    return merge_distribution_catalogue(parse_distribution_catalogue_csv(content))
+def _fetch_distribution_catalogue_rows(
+    api_key=None,
+    service_account_info=None,
+    spreadsheet_config=None,
+):
+    records = _fetch_sheet_records(
+        _sheet_range("lists_tab", LISTS_RANGE, spreadsheet_config),
+        {"bookcategory", "book", "language", "price", "points"},
+        "Lists",
+        api_key,
+        service_account_info,
+        spreadsheet_config,
+    )
+    return parse_distribution_catalogue_csv(
+        _catalogue_records_csv(records)
+    )
+
+
+def sync_distribution_catalogue(
+    api_key=None,
+    service_account_info=None,
+    spreadsheet_config=None,
+):
+    rows = _fetch_distribution_catalogue_rows(
+        api_key,
+        service_account_info,
+        spreadsheet_config,
+    )
+    return merge_distribution_catalogue(rows)
 
 
 def _fetch_sheet_records(
@@ -168,8 +169,10 @@ def _fetch_sheet_records(
     sheet_label,
     api_key=None,
     service_account_info=None,
+    spreadsheet_config=None,
 ):
     api_key = str(api_key or "").strip()
+    spreadsheet_id = _spreadsheet_id(spreadsheet_config)
     headers = {"User-Agent": "HaribolBookDistribution/1.0"}
     if service_account_info:
         try:
@@ -189,11 +192,10 @@ def _fetch_sheet_records(
             ) from exc
     elif not api_key:
         raise ValueError(
-            "Add google_service_account credentials or a permitted Sheets API key "
-            "to Streamlit Cloud Secrets before syncing."
+            "Provide a Google service-account credential or a permitted Sheets API key "
+            "before syncing."
         )
     encoded_range = urllib.parse.quote(sheet_range, safe="!:")
-    spreadsheet_id = _spreadsheet_id(service_account_info)
     url = f"{_GOOGLE_SHEETS_API}/{spreadsheet_id}/values/{encoded_range}"
     query = {
         "valueRenderOption": "UNFORMATTED_VALUE",
@@ -205,7 +207,12 @@ def _fetch_sheet_records(
     request = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
-            payload = json.loads(response.read(5_000_001).decode("utf-8"))
+            response_body = response.read(5_000_001)
+        if len(response_body) > 5_000_000:
+            raise ValueError(
+                f"The {sheet_label} sheet response must be 5 MB or smaller."
+            )
+        payload = json.loads(response_body.decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = str(exc)
         try:
@@ -223,8 +230,7 @@ def _fetch_sheet_records(
         if exc.code == 403:
             detail = (
                 "Google Sheets denied access (HTTP 403). Confirm the spreadsheet "
-                "is shared with the service-account email as Viewer (or is "
-                "public-readable when using an API key), and that the Google "
+                "is shared with the service-account email as Viewer, and that the Google "
                 f"Sheets API is enabled. Google detail: {detail}"
             )
         raise ValueError(f"Could not read the {sheet_label} sheet: {detail}") from exc
@@ -243,8 +249,10 @@ def _fetch_sheet_records(
         )
         raise ValueError(f"Could not read the {sheet_label} sheet: {message}")
     values = payload.get("values")
-    if not isinstance(values, list) or not values:
-        return []
+    if not isinstance(values, list) or not values or not values[0]:
+        raise ValueError(
+            f"The {sheet_label} sheet is empty or has no header row."
+        )
 
     headers = [_normalize_header(value) for value in values[0]]
     if not required_headers.issubset(headers):
@@ -264,9 +272,13 @@ def _fetch_sheet_records(
     return records
 
 
-def fetch_response_sheet(api_key=None, service_account_info=None):
+def fetch_response_sheet(
+    api_key=None,
+    service_account_info=None,
+    spreadsheet_config=None,
+):
     return _fetch_sheet_records(
-        RESPONSES_RANGE,
+        _sheet_range("responses_tab", RESPONSES_RANGE, spreadsheet_config),
         {
             "submissionid",
             "submittedat",
@@ -285,12 +297,17 @@ def fetch_response_sheet(api_key=None, service_account_info=None):
         "responses",
         api_key,
         service_account_info,
+        spreadsheet_config,
     )
 
 
-def fetch_submission_sheet(api_key=None, service_account_info=None):
+def fetch_submission_sheet(
+    api_key=None,
+    service_account_info=None,
+    spreadsheet_config=None,
+):
     return _fetch_sheet_records(
-        SUBMISSIONS_RANGE,
+        _sheet_range("submissions_tab", SUBMISSIONS_RANGE, spreadsheet_config),
         {
             "submissionid",
             "submittedat",
@@ -306,7 +323,82 @@ def fetch_submission_sheet(api_key=None, service_account_info=None):
         "submissions",
         api_key,
         service_account_info,
+        spreadsheet_config,
     )
+
+
+def test_google_sheets_connection(
+    api_key=None,
+    service_account_info=None,
+    spreadsheet_config=None,
+):
+    spreadsheet_config = spreadsheet_config or get_settings()
+    spreadsheet_id = _spreadsheet_id(spreadsheet_config)
+    if not api_key and not service_account_info:
+        raise ValueError(
+            "Provide a Google service-account credential before testing the connection."
+        )
+    tabs = (
+        ("lists_tab", "Lists", "A1:E1", {"bookcategory", "book", "language", "price", "points"}),
+        (
+            "responses_tab",
+            "responses",
+            "A1:M1",
+            {
+                "submissionid",
+                "submittedat",
+                "name",
+                "location",
+                "date",
+                "bookcategory",
+                "bookname",
+                "language",
+                "quantity",
+                "price",
+                "amount",
+                "points",
+                "pointstotal",
+            },
+        ),
+        (
+            "submissions_tab",
+            "submissions",
+            "A1:J1",
+            {
+                "submissionid",
+                "submittedat",
+                "name",
+                "location",
+                "date",
+                "totalcopies",
+                "totalpoints",
+                "lakshmidue",
+                "lakshmitransferred",
+                "shastradaan",
+            },
+        ),
+    )
+    reached_tabs = []
+    for tab_key, label, columns, required_headers in tabs:
+        tab_name = str(spreadsheet_config.get(tab_key) or "").strip()
+        try:
+            sheet_range = _sheet_range(tab_key, columns, spreadsheet_config)
+            _fetch_sheet_records(
+                sheet_range,
+                required_headers,
+                label,
+                api_key,
+                service_account_info,
+                spreadsheet_config,
+            )
+        except ValueError as exc:
+            reached = ", ".join(reached_tabs) if reached_tabs else "none"
+            raise ValueError(
+                f"Could not validate tab {tab_name!r} in spreadsheet "
+                f"{spreadsheet_id}. Tabs reached before failure: {reached}. {exc}"
+            ) from exc
+        reached_tabs.append(tab_name)
+    return {"spreadsheet_id": spreadsheet_id, "tabs": reached_tabs}
 
 
 def _sheet_number(value, field, row_number, allow_blank=False):
@@ -326,7 +418,36 @@ def _sheet_number(value, field, row_number, allow_blank=False):
     return float(number)
 
 
-def import_distribution_responses(records):
+def _pricing_catalogues(connection):
+    books = connection.execute(
+        "SELECT book_name, default_points, price FROM books WHERE active=1"
+    ).fetchall()
+    variants = connection.execute(
+        """
+        SELECT b.book_name, v.language, v.points, v.price
+        FROM book_variants v JOIN books b ON b.id=v.book_id
+        WHERE v.active=1 AND b.active=1
+        """
+    ).fetchall()
+    return (
+        {
+            str(book["book_name"]).casefold(): (
+                float(book["default_points"]),
+                float(book["price"]),
+            )
+            for book in books
+        },
+        {
+            (str(variant["book_name"]).casefold(), str(variant["language"]).casefold()): (
+                float(variant["points"]),
+                float(variant["price"]),
+            )
+            for variant in variants
+        },
+    )
+
+
+def import_distribution_responses(records, connection=None):
     settings = get_settings()
     try:
         fallback_points = float(settings.get("fallback_points", "1"))
@@ -335,14 +456,17 @@ def import_distribution_responses(records):
     if not math.isfinite(fallback_points) or fallback_points < 0:
         raise ValueError("FALLBACK_POINTS must be a finite, non-negative number.")
 
-    pricing = get_book_pricing_catalogue()
-    variant_pricing = get_book_variant_pricing_catalogue()
+    if connection is None:
+        pricing = get_book_pricing_catalogue()
+        variant_pricing = get_book_variant_pricing_catalogue()
+    else:
+        pricing, variant_pricing = _pricing_catalogues(connection)
     added = updated = duplicates = invalid = 0
     issues = []
     submission_occurrences = {}
     imported_at = now_iso()
 
-    with connect() as con:
+    with _connection_scope(connection) as con:
         for row_number, record in enumerate(records, start=2):
             submission_id = str(record.get("submissionid") or "").strip()
             submitted_at = str(record.get("submittedat") or "").strip()
@@ -528,11 +652,11 @@ def import_distribution_responses(records):
     }
 
 
-def import_distribution_submissions(records):
+def import_distribution_submissions(records, connection=None):
     added = updated = unchanged = invalid = 0
     issues = []
     imported_at = now_iso()
-    with connect() as con:
+    with _connection_scope(connection) as con:
         for row_number, record in enumerate(records, start=2):
             submission_id = str(record.get("submissionid") or "").strip()
             submitted_at = str(record.get("submittedat") or "").strip()
@@ -650,12 +774,56 @@ def list_website_submissions():
     )
 
 
-def sync_distribution_responses(api_key=None, service_account_info=None):
-    records = fetch_response_sheet(api_key, service_account_info)
-    submissions = fetch_submission_sheet(api_key, service_account_info)
-    catalogue_result = sync_distribution_catalogue(api_key, service_account_info)
-    result = import_distribution_responses(records)
-    summary_result = import_distribution_submissions(submissions)
+def _reject_invalid_sync_rows(label, result):
+    if not result["invalid"]:
+        return
+    issues = result.get("issues", [])
+    details = "\n".join(issues)
+    raise ValueError(
+        f"Sync validation found {result['invalid']} invalid {label} row(s); "
+        "no spreadsheet data was applied."
+        + (f"\n{details}" if details else "")
+    )
+
+
+def sync_distribution_responses(
+    api_key=None,
+    service_account_info=None,
+    spreadsheet_config=None,
+):
+    spreadsheet_config = spreadsheet_config or get_settings()
+
+    # Read and validate all three tabs before opening a write transaction.
+    records = fetch_response_sheet(
+        api_key, service_account_info, spreadsheet_config
+    )
+    submissions = fetch_submission_sheet(
+        api_key, service_account_info, spreadsheet_config
+    )
+    catalogue_rows = _fetch_distribution_catalogue_rows(
+        api_key, service_account_info, spreadsheet_config
+    )
+
+    with connect() as con:
+        catalogue_result = merge_distribution_catalogue(
+            catalogue_rows,
+            connection=con,
+        )
+        result = import_distribution_responses(records, connection=con)
+        _reject_invalid_sync_rows("response", result)
+        summary_result = import_distribution_submissions(
+            submissions,
+            connection=con,
+        )
+        _reject_invalid_sync_rows("submission summary", summary_result)
+
+    try:
+        _write_catalogue_file()
+    except OSError as exc:
+        result["catalogue_file_warning"] = (
+            "The database sync succeeded, but the local catalogue mirror "
+            f"could not be refreshed: {exc}"
+        )
     result["catalogue_added"] = catalogue_result["added"]
     result["catalogue_updated"] = catalogue_result["updated"]
     result["variants_added"] = catalogue_result["variants_added"]

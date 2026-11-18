@@ -8,6 +8,7 @@ from .catalogue import (
 )
 from .sellers import add_seller, update_seller, list_sellers, set_seller_target, list_seller_targets
 from .settings import get_settings, save_settings
+from .credentials import load_google_service_account
 from .importer import import_response_csv
 from .integrations import (
     fetch_response_sheet,
@@ -17,6 +18,7 @@ from .integrations import (
     list_website_submissions,
     sync_distribution_catalogue,
     sync_distribution_responses,
+    test_google_sheets_connection,
 )
 from .analytics import (
     accumulated_points,

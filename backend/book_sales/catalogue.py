@@ -344,21 +344,65 @@ def merge_distribution_catalogue(rows, connection=None):
     return result
 
 
-def list_book_variants(include_inactive=False):
-    sql = """
-        SELECT v.id, b.book_name, v.book_category, v.book_sub_category,
-               v.language, v.price, v.points, v.stock, v.stock_value,
-               v.books_distributed, v.balance_books, v.amount_collected,
-               v.books_billed, v.billed_amount, v.books_unbilled,
-               v.unbilled_amount, v.allotted_books, v.allotted_books_amt,
-               v.ibc_s_stock, v.ibc_s_stock_amt, v.active, v.updated_at
+def list_book_variants(include_inactive=False, include_response_totals=False):
+    select_columns = """
+        v.id, b.book_name, v.book_category, v.book_sub_category,
+        v.language, v.price, v.points, v.stock, v.stock_value,
+        v.books_distributed, v.balance_books, v.amount_collected,
+        v.books_billed, v.billed_amount, v.books_unbilled,
+        v.unbilled_amount, v.allotted_books, v.allotted_books_amt,
+        v.ibc_s_stock, v.ibc_s_stock_amt, v.active, v.updated_at
+    """
+    from_clause = """
         FROM book_variants v
         JOIN books b ON b.id = v.book_id
     """
+    if include_response_totals:
+        sql = f"""
+        WITH website_response_totals AS (
+            SELECT lower(trim(book_name)) AS normalized_book_name,
+                   lower(trim(language)) AS normalized_language,
+                   SUM(quantity) AS quantity
+            FROM sales
+            WHERE trim(external_submission_id) != ''
+            GROUP BY lower(trim(book_name)), lower(trim(language))
+        )
+        SELECT {select_columns},
+               COALESCE(response_totals.quantity, 0) AS response_books_distributed,
+               CASE WHEN v.stock IS NULL THEN NULL
+                    ELSE v.stock - COALESCE(response_totals.quantity, 0)
+               END AS response_balance_books
+        {from_clause}
+        LEFT JOIN website_response_totals response_totals
+          ON response_totals.normalized_book_name = lower(trim(b.book_name))
+         AND response_totals.normalized_language = lower(trim(v.language))
+        """
+    else:
+        sql = f"SELECT {select_columns} {from_clause}"
     if not include_inactive:
         sql += " WHERE v.active=1"
     sql += " ORDER BY b.book_name COLLATE NOCASE, v.language COLLATE NOCASE"
     return query_df(sql)
+
+
+def unmatched_website_response_totals():
+    result = query_df(
+        """
+        SELECT COUNT(*) AS unmatched_rows,
+               COALESCE(SUM(s.quantity), 0) AS unmatched_quantity
+        FROM sales s
+        WHERE trim(s.external_submission_id) != ''
+          AND NOT EXISTS (
+              SELECT 1
+              FROM book_variants v
+              JOIN books b ON b.id = v.book_id
+              WHERE v.active=1 AND b.active=1
+                AND lower(trim(b.book_name)) = lower(trim(s.book_name))
+                AND lower(trim(v.language)) = lower(trim(s.language))
+          )
+        """
+    ).iloc[0]
+    return int(result["unmatched_rows"]), int(result["unmatched_quantity"])
 
 
 def get_book_variant_pricing_catalogue():

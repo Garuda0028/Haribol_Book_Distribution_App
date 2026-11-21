@@ -1,7 +1,9 @@
 import math
 from datetime import date
 
-from .db import connect
+import streamlit as st
+from streamlit.errors import StreamlitSecretNotFoundError
+
 from .config import (
     DEFAULT_GOOGLE_SHEETS_SETTINGS,
     DEFAULT_GOOGLE_SHEETS_SYNC_SETTINGS,
@@ -9,6 +11,124 @@ from .config import (
     normalize_spreadsheet_id,
     save_env_settings,
 )
+from .db import connect
+
+
+_ENV_SETTING_KEYS = {
+    "overall_target": "OVERALL_POINTS_TARGET",
+    "fallback_points": "FALLBACK_POINTS",
+    "overall_target_start_date": "OVERALL_TARGET_START_DATE",
+    "overall_target_end_date": "OVERALL_TARGET_END_DATE",
+}
+_GOOGLE_SHEET_SETTING_KEYS = {
+    "spreadsheet_id",
+    "lists_tab",
+    "responses_tab",
+    "submissions_tab",
+}
+_SYNC_BOOLEAN_SETTING_KEYS = {
+    "google_sheets_auto_sync",
+    "google_sheets_manual_sync",
+}
+_SYNC_INTERVAL_SETTING_KEY = "google_sheets_sync_interval_minutes"
+_SYNC_SETTING_KEYS = _SYNC_BOOLEAN_SETTING_KEYS | {_SYNC_INTERVAL_SETTING_KEY}
+_SUPPORTED_SETTING_KEYS = (
+    set(_ENV_SETTING_KEYS) | _GOOGLE_SHEET_SETTING_KEYS | _SYNC_SETTING_KEYS
+)
+
+
+def _normalize_settings(values):
+    if any(key not in _SUPPORTED_SETTING_KEYS for key in values):
+        raise ValueError("Only supported application settings can be saved.")
+
+    normalized_values = {}
+    for key, value in values.items():
+        if key in _SYNC_BOOLEAN_SETTING_KEYS:
+            if isinstance(value, bool):
+                normalized_values[key] = "1" if value else "0"
+            else:
+                normalized = str(value or "").strip().lower()
+                if normalized in {"1", "true", "yes", "on"}:
+                    normalized_values[key] = "1"
+                elif normalized in {"0", "false", "no", "off"}:
+                    normalized_values[key] = "0"
+                else:
+                    raise ValueError(f"{key} must be a boolean setting.")
+            continue
+        if key == _SYNC_INTERVAL_SETTING_KEY:
+            normalized_interval = str(value).strip()
+            if isinstance(value, bool) or not normalized_interval.isdecimal():
+                raise ValueError(
+                    "Google Sheets sync interval must be a whole number from 1 to 1440 minutes."
+                )
+            interval_minutes = int(normalized_interval)
+            if not 1 <= interval_minutes <= 1440:
+                raise ValueError(
+                    "Google Sheets sync interval must be between 1 and 1440 minutes."
+                )
+            normalized_values[key] = str(interval_minutes)
+            continue
+        if key in _GOOGLE_SHEET_SETTING_KEYS:
+            normalized = str(value or "").strip()
+            if key == "spreadsheet_id":
+                if not normalized:
+                    raise ValueError("A Google Sheets spreadsheet ID or URL is required.")
+                normalized = normalize_spreadsheet_id(normalized)
+            elif (
+                not normalized
+                or len(normalized) > 100
+                or "\n" in normalized
+                or "\r" in normalized
+            ):
+                raise ValueError(
+                    f"{key} must be a non-empty sheet tab name of 100 characters or fewer."
+                )
+            normalized_values[key] = normalized
+            continue
+        if key in ("overall_target_start_date", "overall_target_end_date"):
+            raw_date = str(value or "").strip()
+            if raw_date:
+                try:
+                    normalized_date = date.fromisoformat(raw_date).isoformat()
+                except ValueError as exc:
+                    raise ValueError(f"{key} must be a valid ISO date.") from exc
+            else:
+                normalized_date = ""
+            normalized_values[key] = normalized_date
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} must be a finite, non-negative number.") from exc
+        if not math.isfinite(number) or number < 0:
+            raise ValueError(f"{key} must be a finite, non-negative number.")
+        normalized_values[key] = str(number)
+
+    start_date = normalized_values.get("overall_target_start_date", "")
+    end_date = normalized_values.get("overall_target_end_date", "")
+    if start_date and end_date and start_date > end_date:
+        raise ValueError("The target start date must be on or before the end date.")
+
+    return normalized_values
+
+
+def _persistent_settings_from_secrets(secrets):
+    try:
+        app_settings = secrets.get("app_settings")
+    except StreamlitSecretNotFoundError:
+        return {}
+    if app_settings is None:
+        return {}
+    if not hasattr(app_settings, "items"):
+        raise ValueError("The app_settings secret must be a TOML table.")
+    return _normalize_settings(dict(app_settings))
+
+
+def get_persistent_settings():
+    try:
+        return _persistent_settings_from_secrets(st.secrets)
+    except StreamlitSecretNotFoundError:
+        return {}
 
 
 def get_settings():
@@ -30,99 +150,27 @@ def get_settings():
         settings.setdefault(setting_key, default_value)
     for setting_key, default_value in DEFAULT_GOOGLE_SHEETS_SYNC_SETTINGS.items():
         settings.setdefault(setting_key, default_value)
-    return settings
 
-def save_settings(values):
-    env_keys = {
-        "overall_target": "OVERALL_POINTS_TARGET",
-        "fallback_points": "FALLBACK_POINTS",
-        "overall_target_start_date": "OVERALL_TARGET_START_DATE",
-        "overall_target_end_date": "OVERALL_TARGET_END_DATE",
-    }
-    google_sheet_keys = {
-        "spreadsheet_id",
-        "lists_tab",
-        "responses_tab",
-        "submissions_tab",
-    }
-    sync_boolean_keys = {
-        "google_sheets_auto_sync",
-        "google_sheets_manual_sync",
-    }
-    sync_interval_key = "google_sheets_sync_interval_minutes"
-    sync_setting_keys = sync_boolean_keys | {sync_interval_key}
-    if any(
-        key not in env_keys and key not in google_sheet_keys and key not in sync_setting_keys
-        for key in values
-    ):
-        raise ValueError("Only supported application settings can be saved.")
-    env_values = {}
-    database_values = {}
-    for key, value in values.items():
-        if key in sync_boolean_keys:
-            if isinstance(value, bool):
-                database_values[key] = "1" if value else "0"
-            else:
-                normalized = str(value or "").strip().lower()
-                if normalized in {"1", "true", "yes", "on"}:
-                    database_values[key] = "1"
-                elif normalized in {"0", "false", "no", "off"}:
-                    database_values[key] = "0"
-                else:
-                    raise ValueError(f"{key} must be a boolean setting.")
-            continue
-        if key == sync_interval_key:
-            normalized_interval = str(value).strip()
-            if isinstance(value, bool) or not normalized_interval.isdecimal():
-                raise ValueError(
-                    "Google Sheets sync interval must be a whole number from 1 to 1440 minutes."
-                )
-            interval_minutes = int(normalized_interval)
-            if not 1 <= interval_minutes <= 1440:
-                raise ValueError(
-                    "Google Sheets sync interval must be between 1 and 1440 minutes."
-                )
-            database_values[key] = str(interval_minutes)
-            continue
-        if key in ("spreadsheet_id", "lists_tab", "responses_tab", "submissions_tab"):
-            normalized = str(value or "").strip()
-            if key == "spreadsheet_id":
-                if not normalized:
-                    raise ValueError("A Google Sheets spreadsheet ID or URL is required.")
-                normalized = normalize_spreadsheet_id(normalized)
-            elif (
-                not normalized
-                or len(normalized) > 100
-                or "\n" in normalized
-                or "\r" in normalized
-            ):
-                raise ValueError(
-                    f"{key} must be a non-empty sheet tab name of 100 characters or fewer."
-                )
-            database_values[key] = normalized
-            continue
-        if key in ("overall_target_start_date", "overall_target_end_date"):
-            raw_date = str(value or "").strip()
-            if raw_date:
-                try:
-                    normalized_date = date.fromisoformat(raw_date).isoformat()
-                except ValueError as exc:
-                    raise ValueError(f"{key} must be a valid ISO date.") from exc
-            else:
-                normalized_date = ""
-            env_values[env_keys[key]] = normalized_date
-            continue
-        try:
-            number = float(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{key} must be a finite, non-negative number.") from exc
-        if not math.isfinite(number) or number < 0:
-            raise ValueError(f"{key} must be a finite, non-negative number.")
-        env_values[env_keys[key]] = str(number)
-    start_date = env_values.get("OVERALL_TARGET_START_DATE", "")
-    end_date = env_values.get("OVERALL_TARGET_END_DATE", "")
+    settings.update(get_persistent_settings())
+    start_date = settings.get("overall_target_start_date", "")
+    end_date = settings.get("overall_target_end_date", "")
     if start_date and end_date and start_date > end_date:
         raise ValueError("The target start date must be on or before the end date.")
+    return settings
+
+
+def save_settings(values):
+    normalized_values = _normalize_settings(values)
+    env_values = {
+        _ENV_SETTING_KEYS[key]: value
+        for key, value in normalized_values.items()
+        if key in _ENV_SETTING_KEYS
+    }
+    database_values = {
+        key: value
+        for key, value in normalized_values.items()
+        if key not in _ENV_SETTING_KEYS
+    }
     if env_values:
         save_env_settings(env_values)
     if database_values:

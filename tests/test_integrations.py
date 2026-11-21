@@ -146,6 +146,61 @@ class IntegrationTests(unittest.TestCase):
             (0.0, 1, 2),
         )
 
+    def test_catalogue_inventory_uses_matched_website_responses(self):
+        connection = sqlite3.connect(":memory:")
+        connection.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, book_name TEXT, active INTEGER);
+            CREATE TABLE book_variants (
+                id INTEGER PRIMARY KEY, book_id INTEGER, book_category TEXT,
+                book_sub_category TEXT, language TEXT, price REAL, points REAL,
+                stock REAL, stock_value REAL, books_distributed REAL,
+                balance_books REAL, amount_collected REAL, books_billed REAL,
+                billed_amount REAL, books_unbilled REAL, unbilled_amount REAL,
+                allotted_books REAL, allotted_books_amt REAL, ibc_s_stock REAL,
+                ibc_s_stock_amt REAL, active INTEGER, updated_at TEXT
+            );
+            CREATE TABLE sales (
+                book_name TEXT, language TEXT, quantity INTEGER,
+                external_submission_id TEXT
+            );
+            INSERT INTO books VALUES (1, 'Title A', 1);
+            INSERT INTO book_variants VALUES (
+                1, 1, 'Big Book', '', 'English', 10, 1, 100, 1000,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, ''
+            );
+            INSERT INTO book_variants VALUES (
+                2, 1, 'Big Book', '', 'Hindi', 10, 1, 50, 500,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, ''
+            );
+            INSERT INTO sales VALUES ('title a', 'english', 3, 'web-1');
+            INSERT INTO sales VALUES ('Title A', 'English', 4, 'web-2');
+            INSERT INTO sales VALUES ('Title A', 'English', 20, '');
+            INSERT INTO sales VALUES ('Unknown title', 'English', 2, 'web-3');
+            """
+        )
+
+        def read_query(sql, params=()):
+            return pd.read_sql_query(sql, connection, params=params)
+
+        try:
+            with patch.object(catalogue, "query_df", side_effect=read_query):
+                variants = catalogue.list_book_variants(
+                    include_response_totals=True
+                )
+                unmatched = catalogue.unmatched_website_response_totals()
+
+            english = variants.set_index("language").loc["English"]
+            hindi = variants.set_index("language").loc["Hindi"]
+            self.assertEqual(english["books_distributed"], 0)
+            self.assertEqual(english["response_books_distributed"], 7)
+            self.assertEqual(english["response_balance_books"], 93)
+            self.assertEqual(hindi["response_books_distributed"], 0)
+            self.assertEqual(hindi["response_balance_books"], 50)
+            self.assertEqual(unmatched, (1, 2))
+        finally:
+            connection.close()
+
     def test_catalogue_sync_reads_configured_lists_tab_with_api_key(self):
         records = [
             {

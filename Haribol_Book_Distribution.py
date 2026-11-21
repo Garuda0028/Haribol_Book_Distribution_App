@@ -335,6 +335,7 @@ def _render_app():
         sync_distribution_responses,
         summarize_inventory_values,
         test_google_sheets_connection,
+        unmatched_website_response_totals,
         load_google_service_account,
         update_sale_points,
         list_book_variants,
@@ -1316,8 +1317,20 @@ def _render_app():
                     "Configure [google_service_account] in Streamlit Secrets before syncing."
                 )
 
-        variants = list_book_variants(include_inactive=True)
-        st.markdown("#### Catalogue and inventory from spreadsheet")
+        unmatched_rows, unmatched_quantity = unmatched_website_response_totals()
+        if unmatched_rows:
+            st.warning(
+                f"{unmatched_rows} synced website-response row(s), totaling "
+                f"{unmatched_quantity} copies, do not match an active catalogue entry "
+                "by book name and language. They are excluded from catalogue inventory "
+                "totals; align the names and languages in the Lists and responses tabs."
+            )
+
+        variants = list_book_variants(
+            include_inactive=True,
+            include_response_totals=True,
+        )
+        st.markdown("#### Catalogue and inventory snapshot")
         if variants.empty:
             st.info("Sync the spreadsheet to load book and inventory details.")
         else:
@@ -1329,10 +1342,10 @@ def _render_app():
                     "language": "Language",
                     "price": "Price (₹)",
                     "points": "Points",
-                    "stock": "Stock",
+                    "stock": "Starting stock (Lists)",
                     "stock_value": "Stock value (₹)",
-                    "books_distributed": "Books distributed",
-                    "balance_books": "Balance books",
+                    "books_distributed": "Books distributed (Lists)",
+                    "balance_books": "Balance books (Lists)",
                     "amount_collected": "Amount collected (₹)",
                     "books_billed": "Books billed",
                     "billed_amount": "Billed amount (₹)",
@@ -1340,6 +1353,8 @@ def _render_app():
                     "unbilled_amount": "Unbilled amount (₹)",
                     "allotted_books": "Allotted books",
                     "allotted_books_amt": "Allotted books amount (₹)",
+                    "response_books_distributed": "Books distributed (responses)",
+                    "response_balance_books": "Balance books (calculated)",
                     "ibc_s_stock": "IBC-S stock",
                     "ibc_s_stock_amt": "IBC-S stock amount (₹)",
                     "active": "In sheet",
@@ -1349,10 +1364,18 @@ def _render_app():
             st.markdown("#### Inventory snapshot")
             active_variants = variants[variants["In sheet"] == 1]
             inventory_metrics = (
-                ("Total stock", "Stock", "count"),
+                ("Starting stock (Lists)", "Starting stock (Lists)", "count"),
                 ("Stock value", "Stock value (₹)", "currency"),
-                ("Books distributed", "Books distributed", "count"),
-                ("Balance books", "Balance books", "count"),
+                (
+                    "Books distributed (responses)",
+                    "Books distributed (responses)",
+                    "count",
+                ),
+                (
+                    "Balance books (calculated)",
+                    "Balance books (calculated)",
+                    "count",
+                ),
             )
             missing_metric_values = []
             for column, (label, field, value_type) in zip(
@@ -1390,7 +1413,10 @@ def _render_app():
                     "to load current inventory."
                 )
             st.caption(
-                "Inventory and billing totals below are read from the configured Lists tab."
+                "Starting stock and stock valuation come from Lists. Books distributed "
+                "uses synced website responses matched by book name and language; "
+                "calculated balance is starting stock minus those responses. The Lists "
+                "tab's original distributed and balance values remain visible for comparison."
             )
             st.dataframe(
                 variants[
@@ -1401,10 +1427,12 @@ def _render_app():
                         "Language",
                         "Price (₹)",
                         "Points",
-                        "Stock",
+                        "Starting stock (Lists)",
                         "Stock value (₹)",
-                        "Books distributed",
-                        "Balance books",
+                        "Books distributed (Lists)",
+                        "Books distributed (responses)",
+                        "Balance books (Lists)",
+                        "Balance books (calculated)",
                         "Amount collected (₹)",
                         "Books billed",
                         "Billed amount (₹)",

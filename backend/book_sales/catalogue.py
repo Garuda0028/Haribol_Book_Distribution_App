@@ -23,6 +23,14 @@ _INVENTORY_FIELDS = (
     "ibc_s_stock_amt",
 )
 
+
+def summarize_inventory_values(values):
+    known_values = values.dropna()
+    if known_values.empty:
+        return None, 0, len(values)
+    return float(known_values.sum()), len(known_values), len(values)
+
+
 def _write_catalogue_file():
     books = list_books(include_inactive=False)
     BOOK_CATALOGUE_PATH.parent.mkdir(parents=True, exist_ok=True)

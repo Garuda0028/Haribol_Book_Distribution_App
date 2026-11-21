@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pandas as pd
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from book_sales import integrations
@@ -129,6 +131,20 @@ class IntegrationTests(unittest.TestCase):
             integrations.parse_distribution_catalogue_csv(
                 output.getvalue().encode("utf-8")
             )
+
+    def test_inventory_summary_uses_known_values_and_reports_missing_rows(self):
+        self.assertEqual(
+            catalogue.summarize_inventory_values(pd.Series([5.0, None, 3.0])),
+            (8.0, 2, 3),
+        )
+        self.assertEqual(
+            catalogue.summarize_inventory_values(pd.Series([None, None])),
+            (None, 0, 2),
+        )
+        self.assertEqual(
+            catalogue.summarize_inventory_values(pd.Series([0.0, None])),
+            (0.0, 1, 2),
+        )
 
     def test_catalogue_sync_reads_configured_lists_tab_with_api_key(self):
         records = [

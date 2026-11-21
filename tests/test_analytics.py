@@ -11,7 +11,11 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from book_sales.analytics import accumulated_points, export_csv, export_sales_csv
-from book_sales.settings import get_settings, save_settings
+from book_sales.settings import (
+    _persistent_settings_from_secrets,
+    get_settings,
+    save_settings,
+)
 
 
 class AnalyticsTests(unittest.TestCase):
@@ -173,6 +177,65 @@ class AnalyticsTests(unittest.TestCase):
             self.assertEqual(settings["google_sheets_auto_sync"], "1")
             self.assertEqual(settings["google_sheets_sync_interval_minutes"], "5")
             self.assertEqual(settings["google_sheets_manual_sync"], "1")
+        finally:
+            connection.close()
+
+    def test_persistent_settings_are_normalized_and_validated(self):
+        settings = _persistent_settings_from_secrets(
+            {
+                "app_settings": {
+                    "spreadsheet_id": (
+                        "https://docs.google.com/spreadsheets/d/"
+                        "persistent-sheet/edit"
+                    ),
+                    "overall_target": 250,
+                    "google_sheets_auto_sync": False,
+                    "google_sheets_sync_interval_minutes": 15,
+                }
+            }
+        )
+
+        self.assertEqual(settings["spreadsheet_id"], "persistent-sheet")
+        self.assertEqual(settings["overall_target"], "250.0")
+        self.assertEqual(settings["google_sheets_auto_sync"], "0")
+        self.assertEqual(settings["google_sheets_sync_interval_minutes"], "15")
+
+    def test_persistent_settings_reject_invalid_values(self):
+        with self.assertRaisesRegex(ValueError, "sync interval"):
+            _persistent_settings_from_secrets(
+                {"app_settings": {"google_sheets_sync_interval_minutes": 0}}
+            )
+        with self.assertRaisesRegex(ValueError, "supported application settings"):
+            _persistent_settings_from_secrets(
+                {"app_settings": {"unknown_setting": "value"}}
+            )
+
+    def test_persistent_settings_override_database_values(self):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "CREATE TABLE settings (setting_key TEXT PRIMARY KEY, setting_value TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO settings VALUES (?, ?)",
+            [("overall_target", "20"), ("spreadsheet_id", "database-sheet")],
+        )
+        try:
+            with (
+                patch("book_sales.settings.connect", return_value=connection),
+                patch("book_sales.settings.get_env_setting", return_value=None),
+                patch(
+                    "book_sales.settings.get_persistent_settings",
+                    return_value={
+                        "overall_target": "250.0",
+                        "spreadsheet_id": "persistent-sheet",
+                    },
+                ),
+            ):
+                settings = get_settings()
+
+            self.assertEqual(settings["overall_target"], "250.0")
+            self.assertEqual(settings["spreadsheet_id"], "persistent-sheet")
         finally:
             connection.close()
 

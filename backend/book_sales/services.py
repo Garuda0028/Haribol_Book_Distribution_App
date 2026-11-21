@@ -4,10 +4,11 @@ from .catalogue import (
     list_book_variants,
     list_books,
     refresh_sales_prices_from_catalogue,
+    summarize_inventory_values,
     update_book,
 )
 from .sellers import add_seller, update_seller, list_sellers, set_seller_target, list_seller_targets
-from .settings import get_settings, save_settings
+from .settings import get_persistent_settings, get_settings, save_settings
 from .credentials import load_google_service_account
 from .importer import import_response_csv
 from .integrations import (

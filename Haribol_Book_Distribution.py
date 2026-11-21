@@ -319,6 +319,7 @@ def _render_app():
         accumulated_points,
         create_backup_zip,
         export_sales_csv,
+        get_persistent_settings,
         get_settings,
         leaderboard,
         list_imports,
@@ -332,6 +333,7 @@ def _render_app():
         set_seller_target,
         sync_distribution_catalogue,
         sync_distribution_responses,
+        summarize_inventory_values,
         test_google_sheets_connection,
         load_google_service_account,
         update_sale_points,
@@ -1352,26 +1354,40 @@ def _render_app():
                 ("Books distributed", "Books distributed", "count"),
                 ("Balance books", "Balance books", "count"),
             )
-            missing_metric_values = False
+            missing_metric_values = []
             for column, (label, field, value_type) in zip(
                 st.columns(len(inventory_metrics)),
                 inventory_metrics,
             ):
                 field_values = active_variants[field]
-                if field_values.empty or field_values.isna().any():
+                value, populated_count, row_count = summarize_inventory_values(
+                    field_values
+                )
+                missing_count = row_count - populated_count
+                if missing_count:
+                    missing_metric_values.append(f"{label}: {missing_count}")
+                if value is None:
                     formatted_value = "—"
-                    missing_metric_values = True
                 else:
-                    value = field_values.sum()
                     if value_type == "currency":
                         formatted_value = f"₹{value:,.2f}"
                     else:
                         formatted_value = f"{value:,.0f}"
                 column.metric(label, formatted_value)
+                column.caption(
+                    f"Values from {populated_count:,} of {row_count:,} active rows"
+                )
             if missing_metric_values:
                 st.caption(
-                    "Summary cards show a dash when an active Lists row has a blank "
-                    "inventory value; fill the sheet to get a complete total."
+                    "Totals include known values only; blank values are excluded, and "
+                    "a dash means none were available. Missing active Lists rows — "
+                    + ", ".join(missing_metric_values)
+                    + ". Fill those cells in the sheet for complete totals."
+                )
+            elif active_variants.empty:
+                st.caption(
+                    "No active Lists rows are available. Sync the configured spreadsheet "
+                    "to load current inventory."
                 )
             st.caption(
                 "Inventory and billing totals below are read from the configured Lists tab."
@@ -1484,16 +1500,37 @@ def _render_app():
             "Manage targets, Google Sheets sync, preferences, and backups.",
         )
         settings = get_settings()
+        persistent_settings = get_persistent_settings()
+        persistent_setting_keys = set(persistent_settings)
+        if persistent_setting_keys:
+            st.info(
+                "Some application settings are managed through Streamlit Secrets and "
+                "cannot be saved here. Update [app_settings] in the Cloud Secrets editor "
+                "and restart the app for those changes to take effect."
+            )
         with st.expander("Targets and import preferences", expanded=True):
+            persistent_target_keys = persistent_setting_keys & {
+                "overall_target",
+                "overall_target_start_date",
+                "overall_target_end_date",
+                "fallback_points",
+            }
+            if persistent_target_keys:
+                st.caption(
+                    "This section is read-only because at least one value is managed "
+                    "through Streamlit Secrets."
+                )
             target_start_date_enabled = st.checkbox(
                 "Set a target start date",
                 value=bool(settings.get("overall_target_start_date")),
                 key="target_start_date_enabled",
+                disabled=bool(persistent_target_keys),
             )
             target_end_date_enabled = st.checkbox(
                 "Set a target end date",
                 value=bool(settings.get("overall_target_end_date")),
                 key="target_end_date_enabled",
+                disabled=bool(persistent_target_keys),
             )
             with st.form("settings_form"):
                 overall_target = st.number_input(
@@ -1503,6 +1540,7 @@ def _render_app():
                     value=float(settings.get("overall_target", "0")),
                     step=0.01,
                     format="%.2f",
+                    disabled=bool(persistent_target_keys),
                 )
                 target_start_date = st.date_input(
                     "Target start date",
@@ -1511,7 +1549,7 @@ def _render_app():
                         if settings.get("overall_target_start_date")
                         else date.today()
                     ),
-                    disabled=not target_start_date_enabled,
+                    disabled=bool(persistent_target_keys) or not target_start_date_enabled,
                     key="target_start_date",
                 )
                 target_end_date = st.date_input(
@@ -1521,7 +1559,7 @@ def _render_app():
                         if settings.get("overall_target_end_date")
                         else date.today()
                     ),
-                    disabled=not target_end_date_enabled,
+                    disabled=bool(persistent_target_keys) or not target_end_date_enabled,
                     key="target_end_date",
                 )
                 st.caption(
@@ -1535,8 +1573,13 @@ def _render_app():
                     value=float(settings.get("fallback_points", "1")),
                     step=0.01,
                     format="%.2f",
+                    disabled=bool(persistent_target_keys),
                 )
-                if st.form_submit_button("Save preferences", type="primary"):
+                if st.form_submit_button(
+                    "Save preferences",
+                    type="primary",
+                    disabled=bool(persistent_target_keys),
+                ):
                     try:
                         save_settings({
                             "overall_target": str(float(overall_target)),
@@ -1559,12 +1602,23 @@ def _render_app():
 
         with st.expander("Google Sheets sync schedule", expanded=True):
             sync_settings = get_settings()
+            persistent_sync_keys = persistent_setting_keys & {
+                "google_sheets_auto_sync",
+                "google_sheets_sync_interval_minutes",
+                "google_sheets_manual_sync",
+            }
+            if persistent_sync_keys:
+                st.caption(
+                    "This section is read-only because at least one value is managed "
+                    "through Streamlit Secrets."
+                )
             with st.form("google_sheets_sync_schedule_form"):
                 auto_sync_enabled = st.checkbox(
                     "Automatically sync all configured tabs",
                     value=_google_sync_setting_enabled(
                         sync_settings, "google_sheets_auto_sync"
                     ),
+                    disabled=bool(persistent_sync_keys),
                     help=(
                         "A full sync reads the Lists, responses, and submissions tabs, "
                         "validates the data, then applies it in one database transaction."
@@ -1580,7 +1634,7 @@ def _render_app():
                         )
                     ),
                     step=1,
-                    disabled=not auto_sync_enabled,
+                    disabled=bool(persistent_sync_keys) or not auto_sync_enabled,
                     help="Allowed interval: 1 to 1440 minutes. The default is 5 minutes.",
                 )
                 manual_sync_enabled = st.checkbox(
@@ -1588,6 +1642,7 @@ def _render_app():
                     value=_google_sync_setting_enabled(
                         sync_settings, "google_sheets_manual_sync"
                     ),
+                    disabled=bool(persistent_sync_keys),
                 )
                 st.caption(
                     "Automatic sync runs immediately when the first dashboard session "
@@ -1598,6 +1653,7 @@ def _render_app():
                 save_sync_schedule = st.form_submit_button(
                     "Save sync schedule",
                     type="primary",
+                    disabled=bool(persistent_sync_keys),
                 )
             if save_sync_schedule:
                 try:
@@ -1615,16 +1671,27 @@ def _render_app():
                     st.error(f"Could not save the sync schedule: {exc}")
 
         with st.expander("Google Sheets connection", expanded=True):
+            persistent_sheet_keys = persistent_setting_keys & {
+                "spreadsheet_id",
+                "lists_tab",
+                "responses_tab",
+                "submissions_tab",
+            }
             st.info(
-                "Keep workbook settings editable here. Google service-account credentials "
-                "are read only from Streamlit Secrets and are never saved in the app database."
+                "Google service-account credentials are read only from Streamlit Secrets "
+                "and are never saved in the app database."
             )
             st.caption(
-                "The spreadsheet ID and tab names are non-secret settings stored by the app. "
-                "Store the service-account fields under [google_service_account] in Streamlit "
-                "Cloud → App settings → Secrets. For local development, use "
-                ".streamlit/secrets.toml and keep it out of source control."
+                "For durable settings on Streamlit Community Cloud, put the spreadsheet ID "
+                "and tab names under [app_settings] in Cloud → App settings → Secrets. "
+                "Values in Secrets are read-only here. Locally, settings can still be saved "
+                "from this page to SQLite."
             )
+            if persistent_sheet_keys:
+                st.caption(
+                    "The spreadsheet connection settings are managed through Streamlit "
+                    "Secrets. Update [app_settings] and restart the app to change them."
+                )
             st.warning(
                 "This app has no separate user accounts or roles. Anyone who can use this "
                 "dashboard can initiate syncs, so keep the Streamlit app private."
@@ -1649,26 +1716,32 @@ def _render_app():
                     value=current_config["spreadsheet_id"],
                     key="google_sheets_spreadsheet_id",
                     help="Paste the workbook URL or its ID. No workbook ID is embedded in the app.",
+                    disabled=bool(persistent_sheet_keys),
                 )
                 lists_tab = st.text_input(
                     "Catalogue tab name",
                     value=current_config["lists_tab"],
                     key="google_sheets_lists_tab",
+                    disabled=bool(persistent_sheet_keys),
                 )
                 responses_tab = st.text_input(
                     "Book responses tab name",
                     value=current_config["responses_tab"],
                     key="google_sheets_responses_tab",
+                    disabled=bool(persistent_sheet_keys),
                 )
                 submissions_tab = st.text_input(
                     "Submission summaries tab name",
                     value=current_config["submissions_tab"],
                     key="google_sheets_submissions_tab",
+                    disabled=bool(persistent_sheet_keys),
                 )
                 test_button, save_button, discard_button = st.columns(3)
                 test_connection = test_button.form_submit_button("Test connection")
                 save_connection = save_button.form_submit_button(
-                    "Save settings", type="primary"
+                    "Save settings",
+                    type="primary",
+                    disabled=bool(persistent_sheet_keys),
                 )
                 discard_changes = discard_button.form_submit_button("Discard")
 
@@ -1694,10 +1767,16 @@ def _render_app():
                 st.session_state.get("_google_sheets_tested_config_hash")
                 == config_fingerprint
             ):
-                st.info(
-                    "These staged settings passed the read-only connection test. "
-                    "Select Save settings to apply them, or Discard."
-                )
+                if persistent_sheet_keys:
+                    st.info(
+                        "The configured settings passed the read-only connection test "
+                        "and are managed through Streamlit Secrets."
+                    )
+                else:
+                    st.info(
+                        "These staged settings passed the read-only connection test. "
+                        "Select Save settings to apply them, or Discard."
+                    )
             if test_connection:
                 try:
                     service_account_info = _google_sheet_credentials()
@@ -1713,7 +1792,11 @@ def _render_app():
                     reached_message = (
                         f"Connected to spreadsheet {reached['spreadsheet_id']}; "
                         f"reached tabs: {', '.join(reached['tabs'])}. "
-                        "Save these tested settings or discard them."
+                        + (
+                            "Settings are managed through Streamlit Secrets."
+                            if persistent_sheet_keys
+                            else "Save these tested settings or discard them."
+                        )
                     )
                     st.session_state["_google_sheets_tested_config_hash"] = (
                         config_fingerprint
@@ -1755,6 +1838,31 @@ def _render_app():
 
             with st.expander("Streamlit Secrets format"):
                 st.caption(
+                    "To keep workbook settings, target values, fallback points, and sync "
+                    "schedule across Cloud restarts, add or update this [app_settings] "
+                    "table in the Cloud Secrets editor. Replace the spreadsheet ID."
+                )
+                st.code(
+                    "[app_settings]\n"
+                    'spreadsheet_id = "PASTE_SPREADSHEET_ID_HERE"\n'
+                    'lists_tab = "Lists"\n'
+                    'responses_tab = "responses"\n'
+                    'submissions_tab = "submissions"\n'
+                    "overall_target = 0\n"
+                    'overall_target_start_date = ""\n'
+                    'overall_target_end_date = ""\n'
+                    "fallback_points = 1\n"
+                    "google_sheets_auto_sync = true\n"
+                    "google_sheets_sync_interval_minutes = 5\n"
+                    "google_sheets_manual_sync = true",
+                    language="toml",
+                )
+                st.caption(
+                    "Values in [app_settings] are read-only in this app; edit Secrets and "
+                    "restart to change them. Sales, devotee targets, and other SQLite data "
+                    "are still temporary on Streamlit Community Cloud."
+                )
+                st.caption(
                     "Paste your actual Google service-account values in Streamlit Cloud's "
                     "Secrets editor (TOML format). Do not use the example placeholders."
                 )
@@ -1782,7 +1890,10 @@ def _render_app():
         with st.expander("Data and backups"):
             st.caption(
                 "Application data is stored on the server in the "
-                f"`{DATA_DIR.name}` folder. The full server path is hidden."
+                f"`{DATA_DIR.name}` folder. The full server path is hidden. "
+                "Streamlit Community Cloud does not preserve this SQLite data across "
+                "restarts; download backups and use durable hosted storage for records "
+                "that must not be lost."
             )
             st.download_button(
                 "Download complete data backup",

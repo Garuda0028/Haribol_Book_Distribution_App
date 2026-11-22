@@ -21,7 +21,7 @@ FALLBACK_POINTS=1
 
 Environment variables with the same names override `.env`; Streamlit Cloud `[app_settings]` values override both environment and SQLite settings. The local `.env` file is gitignored; do not upload it. The Google Sheet is the source of truth for book variants, prices, and points. Sales and devotee targets are stored in the SQLite database for the running app instance; local runs persist on disk, while Community Cloud storage is ephemeral.
 
-The app version is read from the newest numbered release in `CHANGELOG.md`; it is not a manually edited `.env` value. The `[Unreleased]` section documents changes that have not yet been assigned a release version. When preparing a release, run one of these from the project folder to automatically increment the version and add a dated release-history entry:
+The app version is read from the newest numbered release in `CHANGELOG.md`; it is not a manually edited `.env` value. Work that has not shipped may be tracked in an `[Unreleased]` section, which does not change the displayed version. When preparing a release, run one of these from the project folder to automatically increment the version and add a dated release-history entry:
 
 ```text
 python scripts/release.py feature "Describe the new feature"
@@ -39,10 +39,13 @@ Use `feature` for a minor-version increment, `fix` for a patch increment, and `b
 - Fallback points for unknown book titles.
 - Manual point correction for a specific historical sale.
 - Top 10 most active devotees, daily totals, book-by-book performance, filters, CSV exports, and prior import history.
+- Category-wise daily and cumulative distribution report with a JPEG download.
 - Devotee names from imports match existing names despite differences in case or extra whitespace.
-- Overview comparisons against the previous day, configurable 7/30/90-day trends, average copies per sale/day, and best distribution day.
+- Overview comparisons against the previous day, configurable 7/30/90-day and all-time trends, average copies per sale/day, and best distribution day.
 
 The Overview date controls the daily metrics, previous-day comparisons, trend charts, and book performance. Overall target progress uses points accumulated through the selected date, including that date. The trend period selector shows activity up to the selected date. The **Top 10 most active devotees** list is independent of the Overview date: it aggregates sales through today, includes earlier sales, shows the latest distribution date for each devotee, and orders the most recently active devotees first.
+
+The **Daily reports** section uses the selected Overview date for its daily totals and includes cumulative totals through that date. Both are limited to the configured overall target start and end dates; daily totals are zero if the selected date is outside that range. The report groups sales into Small Books, Medium Books, Big Books, Maha Big Books, Bhagavatam, and Caitanya Caritamrita; unrecognized categories appear under Other. Target progress respects the configured target period. Shastra Daan collected uses the `shastra_daan` total, and Shastra Daan Books Distributed uses the `lakshmi_transferred` total from submission summaries. The report can be downloaded as a JPEG image.
 
 Each valid synced book-level response can represent multiple copies of one book. Website sales preserve the response sheet's reported price and points totals. Updating the catalogue does not silently rewrite historical sales.
 
@@ -192,6 +195,7 @@ Haribol_Book_Distribution/
 │       ├── credentials.py    # Read-only Streamlit Secrets credential loader
 │       ├── importer.py        # CSV validation, deduplication and import
 │       ├── analytics.py       # Aggregations, leaderboard and exports
+│       ├── report_image.py    # JPEG distribution report rendering
 │       └── services.py        # Public service facade
 ├── requirements.txt
 ├── README.md

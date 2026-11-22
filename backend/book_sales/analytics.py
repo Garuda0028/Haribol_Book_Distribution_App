@@ -1,6 +1,150 @@
 from .repository import query_df
 from .settings import get_settings
 
+DISTRIBUTION_REPORT_CATEGORIES = (
+    "Small Books",
+    "Medium Books",
+    "Big Books",
+    "Maha Big Books",
+    "Bhagavatam",
+    "Caitanya Caritamrita",
+)
+
+
+def _distribution_category(book_category, book_sub_category):
+    category = " ".join(str(book_category or "").casefold().split())
+    subcategory = " ".join(str(book_sub_category or "").casefold().split())
+    combined = f"{category} {subcategory}"
+    if "caitanya caritamrita" in combined:
+        return "Caitanya Caritamrita"
+    if "bhagavatam" in combined:
+        return "Bhagavatam"
+    for label, singular in (
+        ("Small Books", "small book"),
+        ("Medium Books", "medium book"),
+        ("Big Books", "big book"),
+        ("Maha Big Books", "maha big book"),
+    ):
+        if category == singular or category == singular + "s":
+            return label
+    return "Other"
+
+
+def _distribution_category_totals(
+    as_of_date,
+    start_date=None,
+    sale_date=None,
+    end_date=None,
+):
+    if sale_date is None:
+        date_filter = "sale_date <= ? AND (? IS NULL OR sale_date >= ?)"
+        params = (as_of_date, start_date, start_date)
+    else:
+        date_filter = (
+            "sale_date = ? "
+            "AND (? IS NULL OR sale_date >= ?) "
+            "AND (? IS NULL OR sale_date <= ?)"
+        )
+        params = (sale_date, start_date, start_date, end_date, end_date)
+    rows = query_df(
+        f"""
+        SELECT book_category, book_sub_category,
+               COALESCE(SUM(quantity),0) AS copies,
+               COALESCE(SUM(COALESCE(reported_points_total, points * quantity)),0) AS points
+        FROM sales
+        WHERE {date_filter}
+        GROUP BY book_category, book_sub_category
+        """,
+        params,
+    )
+    totals = {category: {"copies": 0, "points": 0.0} for category in DISTRIBUTION_REPORT_CATEGORIES}
+    for row in rows.to_dict("records"):
+        category = _distribution_category(
+            row["book_category"],
+            row["book_sub_category"],
+        )
+        totals.setdefault(category, {"copies": 0, "points": 0.0})
+        totals[category]["copies"] += int(row["copies"])
+        totals[category]["points"] += float(row["points"])
+    return totals
+
+
+def distribution_report(as_of_date):
+    settings = get_settings()
+    start_date = settings.get("overall_target_start_date") or None
+    end_date = settings.get("overall_target_end_date") or None
+    report_end_date = min(as_of_date, end_date) if end_date else as_of_date
+    daily_totals = _distribution_category_totals(
+        as_of_date,
+        start_date=start_date,
+        sale_date=as_of_date,
+        end_date=end_date,
+    )
+    overall_totals = _distribution_category_totals(
+        report_end_date,
+        start_date=start_date,
+    )
+    categories = list(DISTRIBUTION_REPORT_CATEGORIES)
+    if "Other" in overall_totals:
+        categories.append("Other")
+
+    daily = [
+        {"category": category, **daily_totals.get(category, {"copies": 0, "points": 0.0})}
+        for category in categories
+    ]
+    overall = [
+        {"category": category, **overall_totals.get(category, {"copies": 0, "points": 0.0})}
+        for category in categories
+    ]
+
+    target_points = float(settings.get("overall_target", "0"))
+    total_book_points = accumulated_points(
+        as_of_date,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    target_progress_pct = (
+        min(100.0, total_book_points / target_points * 100)
+        if target_points > 0
+        else None
+    )
+    submission_totals = query_df(
+        """
+        SELECT COALESCE(SUM(lakshmi_transferred),0) AS lakshmi_transferred,
+               COALESCE(SUM(shastra_daan),0) AS shastra_daan
+        FROM website_submissions
+        WHERE sale_date <= ?
+          AND (? IS NULL OR sale_date >= ?)
+        """,
+        (report_end_date, start_date, start_date),
+    ).iloc[0]
+    legacy_daan = query_df(
+        "SELECT COALESCE(SUM(shastra_daan),0) AS shastra_daan "
+        "FROM sales WHERE sale_date <= ? "
+        "AND (? IS NULL OR sale_date >= ?)",
+        (report_end_date, start_date, start_date),
+    ).iloc[0]["shastra_daan"]
+    return {
+        "date": as_of_date,
+        "daily": daily,
+        "overall": overall,
+        "daily_total_copies": sum(row["copies"] for row in daily),
+        "daily_total_points": sum(row["points"] for row in daily),
+        "overall_total_copies": sum(row["copies"] for row in overall),
+        "overall_total_points": sum(row["points"] for row in overall),
+        "target_points": target_points,
+        "total_book_points": total_book_points,
+        "target_progress_pct": target_progress_pct,
+        "period_start_date": start_date,
+        "period_end_date": report_end_date,
+        "shastra_daan_collected": float(submission_totals["shastra_daan"])
+        + float(legacy_daan),
+        "shastra_daan_books_distributed": float(
+            submission_totals["lakshmi_transferred"]
+        ),
+    }
+
+
 def dashboard_summary(sale_date=None):
     settings = get_settings()
     active_sellers = query_df("SELECT COUNT(*) AS n FROM sellers WHERE active=1").iloc[0]["n"]

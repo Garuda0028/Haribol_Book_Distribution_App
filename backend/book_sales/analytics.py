@@ -139,9 +139,7 @@ def distribution_report(as_of_date):
         "period_end_date": report_end_date,
         "shastra_daan_collected": float(submission_totals["shastra_daan"])
         + float(legacy_daan),
-        "shastra_daan_books_distributed": float(
-            submission_totals["lakshmi_transferred"]
-        ),
+        "total_lakshmi_collected": float(submission_totals["lakshmi_transferred"]),
     }
 
 

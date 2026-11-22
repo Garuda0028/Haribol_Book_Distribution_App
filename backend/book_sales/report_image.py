@@ -222,8 +222,8 @@ def render_distribution_report_jpeg(report):
             _ORANGE,
         ),
         (
-            "Shastra Daan Books Distributed",
-            report["shastra_daan_books_distributed"],
+            "Total Lakshmi Collected",
+            report["total_lakshmi_collected"],
             _LAVENDER,
         ),
     ):

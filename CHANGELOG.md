@@ -1,8 +1,9 @@
 # Release history
 
-## [Unreleased]
+## [1.11.0] - 2026-11-22
 
 - Show the 10 most recently active devotees with cumulative sales through today, ordered by latest distribution date
+- Add daily and cumulative category distribution reports, bounded by configured target dates, with a JPEG download
 - Match imported devotee names without regard to case or excess whitespace
 - Update the README for the hosted Streamlit app and clarify local versus hosted storage behavior
 

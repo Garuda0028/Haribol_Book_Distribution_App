@@ -339,7 +339,9 @@ def _render_app():
         load_google_service_account,
         update_sale_points,
         list_book_variants,
+        distribution_report,
     )
+    from book_sales.report_image import render_distribution_report_jpeg
 
     st.set_page_config(page_title=APP_NAME, page_icon="📖", layout="wide")
     initialize_database()
@@ -1021,6 +1023,27 @@ def _render_app():
                     use_container_width=True,
                     hide_index=True,
                 )
+
+        with st.expander("Daily reports", expanded=False):
+            report = distribution_report(selected_date.isoformat())
+            report_jpeg = render_distribution_report_jpeg(report)
+            report_period_end = report["period_end_date"] or selected_date.isoformat()
+            st.image(
+                report_jpeg,
+                caption="Daily and overall distribution summary through the selected date.",
+                use_container_width=True,
+            )
+            st.caption(
+                "Report period: "
+                f"{report['period_start_date'] or 'all time'} through {report_period_end}. "
+                "Daily totals are shown only when the selected date falls inside this period."
+            )
+            st.download_button(
+                "Download report as JPEG",
+                data=report_jpeg,
+                file_name=f"book_distribution_report_{selected_date.isoformat()}.jpg",
+                mime="image/jpeg",
+            )
 
         with st.expander("Book performance for selected date", expanded=True):
             books = book_performance(selected_date.isoformat())

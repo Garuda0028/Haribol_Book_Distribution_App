@@ -27,6 +27,7 @@ from .analytics import (
     book_performance,
     dashboard_summary,
     daily_summary,
+    distribution_report,
     export_csv,
     export_sales_csv,
     leaderboard,

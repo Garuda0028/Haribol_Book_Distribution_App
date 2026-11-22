@@ -49,7 +49,7 @@ def leaderboard(include_all_active=False, sale_date=None):
                COALESCE(ROUND(SUM(sa.shastra_daan),2),0) AS shastra_daan,
                COALESCE(t.target_points,0) AS target_points
         FROM sellers s
-        LEFT JOIN sales sa ON sa.seller_name = s.seller_name COLLATE NOCASE
+        LEFT JOIN sales sa ON lower(trim(sa.seller_name)) = lower(trim(s.seller_name))
                          AND (? IS NULL OR sa.sale_date = ?)
         LEFT JOIN seller_targets t ON t.seller_id = s.id
     """

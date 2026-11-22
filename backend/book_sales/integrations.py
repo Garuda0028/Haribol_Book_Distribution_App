@@ -16,7 +16,7 @@ from .catalogue import (
     merge_distribution_catalogue,
 )
 from .config import normalize_spreadsheet_id
-from .db import connect
+from .db import connect, normalize_seller_name, resolve_seller_name
 from .importer import parse_date
 from .repository import now_iso, query_df
 from .settings import get_settings
@@ -539,7 +539,7 @@ def import_distribution_responses(records, connection=None):
         for row_number, record in enumerate(records, start=2):
             submission_id = str(record.get("submissionid") or "").strip()
             submitted_at = str(record.get("submittedat") or "").strip()
-            seller = str(record.get("name") or "").strip()
+            seller = normalize_seller_name(record.get("name"))
             sale_date = parse_date(record.get("date"))
             category = str(record.get("bookcategory") or "").strip()
             subcategory = str(record.get("booksubcategory") or "").strip()
@@ -602,6 +602,7 @@ def import_distribution_responses(records, connection=None):
             )
             points = sheet_points if sheet_points is not None else catalogue_points
             unit_price = sheet_price if sheet_price is not None else catalogue_price
+            seller = resolve_seller_name(con, seller)
             con.execute(
                 "INSERT OR IGNORE INTO sellers(seller_name,active,created_at) VALUES(?,1,?)",
                 (seller, imported_at),
@@ -733,7 +734,7 @@ def import_distribution_submissions(records, connection=None):
         for row_number, record in enumerate(records, start=2):
             submission_id = str(record.get("submissionid") or "").strip()
             submitted_at = str(record.get("submittedat") or "").strip()
-            seller = str(record.get("name") or "").strip()
+            seller = normalize_seller_name(record.get("name"))
             location = str(record.get("location") or "").strip()
             sale_date = parse_date(record.get("date"))
             try:

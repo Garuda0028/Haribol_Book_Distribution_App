@@ -18,6 +18,7 @@ _CREAM = "#FBE5D0"
 _YELLOW = "#FFF000"
 _ORANGE = "#FF9800"
 _LAVENDER = "#D8CFE8"
+_CURRENCY_FONT = Path(__file__).resolve().parents[2] / "assets" / "Lato-Regular.ttf"
 
 
 def _font(size, bold=False):
@@ -79,11 +80,7 @@ def render_distribution_report_jpeg(report):
     regular = _font(25)
     bold = _font(27, bold=True)
     small_bold = _font(23, bold=True)
-    try:
-        regular.getbbox("\u20b9")
-        currency_symbol = "\u20b9"
-    except UnicodeEncodeError:
-        currency_symbol = "INR "
+    currency_font = ImageFont.truetype(str(_CURRENCY_FONT), size=25)
 
     x0 = _MARGIN
     x1 = x0 + _COLUMN_WIDTHS[0]
@@ -238,9 +235,9 @@ def render_distribution_report_jpeg(report):
         _draw_cell(
             draw,
             (x1, y, x3, y + _ROW_HEIGHT),
-            f"{currency_symbol}{float(amount):,.2f}",
+            _format_currency(amount),
             color,
-            regular,
+            currency_font,
         )
         y += _ROW_HEIGHT
 

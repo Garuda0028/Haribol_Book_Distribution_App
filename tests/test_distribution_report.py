@@ -125,7 +125,7 @@ class DistributionReportTests(unittest.TestCase):
         self.assertEqual(report["total_book_points"], 9)
         self.assertEqual(report["target_progress_pct"], 90)
         self.assertEqual(report["shastra_daan_collected"], 7)
-        self.assertEqual(report["shastra_daan_books_distributed"], 4)
+        self.assertEqual(report["total_lakshmi_collected"], 4)
 
     def test_selected_date_outside_configured_period_has_no_daily_totals(self):
         report = distribution_report("2026-05-04")
@@ -135,7 +135,7 @@ class DistributionReportTests(unittest.TestCase):
         self.assertEqual(report["overall_total_copies"], 5)
         self.assertEqual(report["total_book_points"], 9)
         self.assertEqual(report["shastra_daan_collected"], 7)
-        self.assertEqual(report["shastra_daan_books_distributed"], 4)
+        self.assertEqual(report["total_lakshmi_collected"], 4)
 
     def test_report_renders_a_valid_jpeg_image(self):
         report = distribution_report("2026-05-03")

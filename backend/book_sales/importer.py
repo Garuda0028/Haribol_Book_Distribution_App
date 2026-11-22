@@ -330,6 +330,8 @@ def import_response_csv(content, filename):
                 sale_items,
                 start=1,
             ):
+                from .db import normalize_seller_name, resolve_seller_name
+                seller = resolve_seller_name(con, normalize_seller_name(seller))
                 con.execute(
                     "INSERT OR IGNORE INTO sellers(seller_name,active,created_at) VALUES(?,1,?)",
                     (seller, imported_at),

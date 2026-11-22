@@ -12,6 +12,27 @@ from book_sales import db
 
 
 class DatabaseMigrationTests(unittest.TestCase):
+    def test_seller_name_normalization_is_case_and_whitespace_insensitive(self):
+        self.assertEqual(db.normalize_seller_name("  rohit   kumar  "), "rohit kumar")
+        self.assertEqual(db.seller_name_key("  ROHIT   Kumar "), "rohit kumar")
+
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "CREATE TABLE sellers (id INTEGER PRIMARY KEY, seller_name TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO sellers(seller_name) VALUES (?)",
+            ("Rohit Kumar",),
+        )
+        try:
+            self.assertEqual(
+                db.resolve_seller_name(connection, "  rohit   KUMAR "),
+                "Rohit Kumar",
+            )
+        finally:
+            connection.close()
+
     def test_inventory_and_subcategory_fields_are_added_to_existing_database(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             data_dir = Path(temporary_directory)

@@ -1,5 +1,11 @@
 # Release history
 
+## [Unreleased]
+
+- Show the 10 most recently active devotees with cumulative sales through today, ordered by latest distribution date
+- Match imported devotee names without regard to case or excess whitespace
+- Update the README for the hosted Streamlit app and clarify local versus hosted storage behavior
+
 ## [1.10.0] - 2026-11-16
 
 - Read the configured spreadsheet URL from service-account secrets for catalogue, response, and submission syncs, with a built-in fallback

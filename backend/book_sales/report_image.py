@@ -18,6 +18,7 @@ _CREAM = "#FBE5D0"
 _YELLOW = "#FFF000"
 _ORANGE = "#FF9800"
 _LAVENDER = "#D8CFE8"
+_RUPEE_SYMBOL = Path(__file__).resolve().parents[2] / "assets" / "Indian_Rupee_symbol.png"
 
 
 def _font(size, bold=False):
@@ -45,10 +46,6 @@ def _format_number(value):
     return formatted.rstrip("0").rstrip(".")
 
 
-def _format_currency(value):
-    return f"\u20b9{float(value):,.2f}"
-
-
 def _draw_cell(draw, bounds, text, fill, font, align="center", padding=14):
     left, top, right, bottom = bounds
     draw.rectangle(bounds, fill=fill, outline=_BLACK, width=3)
@@ -66,6 +63,21 @@ def _draw_cell(draw, bounds, text, fill, font, align="center", padding=14):
     draw.text((x, y), text, fill=_BLACK, font=font)
 
 
+def _draw_currency_cell(image, draw, bounds, amount, fill, font, symbol):
+    left, top, right, bottom = bounds
+    text = f"{float(amount):,.2f}"
+    text_bounds = draw.textbbox((0, 0), text, font=font)
+    text_width = text_bounds[2] - text_bounds[0]
+    text_height = text_bounds[3] - text_bounds[1]
+    symbol_width = max(1, round(symbol.width * text_height / symbol.height))
+    icon = symbol.resize((symbol_width, text_height), Image.Resampling.LANCZOS)
+    x = round(left + (right - left - symbol_width - 4 - text_width) / 2)
+    y = round(top + (bottom - top - text_height) / 2)
+    draw.rectangle(bounds, fill=fill, outline=_BLACK, width=3)
+    image.paste(icon, (x, y), icon)
+    draw.text((x + symbol_width + 4, y - text_bounds[1]), text, fill=_BLACK, font=font)
+
+
 def render_distribution_report_jpeg(report):
     rows_per_table = len(report["daily"])
     data_rows = 2 * (rows_per_table + 1) + 4
@@ -79,11 +91,8 @@ def render_distribution_report_jpeg(report):
     regular = _font(25)
     bold = _font(27, bold=True)
     small_bold = _font(23, bold=True)
-    try:
-        regular.getbbox("\u20b9")
-        currency_symbol = "\u20b9"
-    except UnicodeEncodeError:
-        currency_symbol = "INR "
+    with Image.open(_RUPEE_SYMBOL) as source:
+        rupee_symbol = source.convert("RGBA")
 
     x0 = _MARGIN
     x1 = x0 + _COLUMN_WIDTHS[0]
@@ -235,12 +244,14 @@ def render_distribution_report_jpeg(report):
             small_bold,
             align="left",
         )
-        _draw_cell(
+        _draw_currency_cell(
+            image,
             draw,
             (x1, y, x3, y + _ROW_HEIGHT),
-            f"{currency_symbol}{float(amount):,.2f}",
+            amount,
             color,
             regular,
+            rupee_symbol,
         )
         y += _ROW_HEIGHT
 

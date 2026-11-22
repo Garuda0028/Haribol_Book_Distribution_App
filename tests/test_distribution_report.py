@@ -6,11 +6,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from book_sales.analytics import distribution_report
+from book_sales import report_image
 from book_sales.report_image import render_distribution_report_jpeg
 
 
@@ -146,6 +147,52 @@ class DistributionReportTests(unittest.TestCase):
             self.assertEqual(image.format, "JPEG")
             self.assertEqual(image.width, 1080)
             self.assertGreater(image.height, 900)
+
+    def test_currency_rows_render_rupee_symbol_without_system_glyph(self):
+        report = distribution_report("2026-05-03")
+        with (
+            patch(
+                "book_sales.report_image._font",
+                return_value=ImageFont.load_default(size=25),
+            ),
+            patch(
+                "book_sales.report_image._draw_currency_cell",
+                wraps=report_image._draw_currency_cell,
+            ) as draw_currency_cell,
+        ):
+            jpeg = render_distribution_report_jpeg(report)
+
+        self.assertEqual(
+            [call.args[3] for call in draw_currency_cell.call_args_list],
+            [7, 4],
+        )
+        with Image.open(io.BytesIO(jpeg)) as image:
+            draw = ImageDraw.Draw(image)
+            for call in draw_currency_cell.call_args_list:
+                bounds, amount, font, symbol = (
+                    call.args[2], call.args[3], call.args[5], call.args[6]
+                )
+                text_bounds = draw.textbbox((0, 0), f"{amount:,.2f}", font=font)
+                text_width = text_bounds[2] - text_bounds[0]
+                text_height = text_bounds[3] - text_bounds[1]
+                symbol_width = max(1, round(symbol.width * text_height / symbol.height))
+                expected = symbol.resize(
+                    (symbol_width, text_height), Image.Resampling.LANCZOS
+                )
+                x = round(bounds[0] + (bounds[2] - bounds[0] - symbol_width - 4 - text_width) / 2)
+                y = round(bounds[1] + (bounds[3] - bounds[1] - text_height) / 2)
+                opaque_pixels = [
+                    (sx, sy)
+                    for sy in range(text_height)
+                    for sx in range(symbol_width)
+                    if expected.getpixel((sx, sy))[3] > 230
+                ]
+                self.assertGreater(len(opaque_pixels), 0)
+                dark_pixels = sum(
+                    max(image.getpixel((x + sx, y + sy))) < 100
+                    for sx, sy in opaque_pixels
+                )
+                self.assertGreater(dark_pixels / len(opaque_pixels), 0.65)
 
 
 if __name__ == "__main__":

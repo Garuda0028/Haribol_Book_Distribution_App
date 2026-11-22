@@ -1,17 +1,24 @@
 import math
 
+from .db import connect, normalize_seller_name, resolve_seller_name
 from .repository import execute, query_df, now_iso
 
 def add_seller(name):
-    name = str(name or "").strip()
+    name = normalize_seller_name(name)
     if not name:
         raise ValueError("Devotee name is required.")
-    try:
-        execute("INSERT INTO sellers(seller_name,active,created_at) VALUES(?,1,?)", (name, now_iso()))
-    except Exception as exc:
-        if "UNIQUE" in str(exc).upper():
-            raise ValueError("A devotee with that name already exists.") from exc
-        raise
+    with connect() as con:
+        name = resolve_seller_name(con, name)
+        existing = con.execute(
+            "SELECT id FROM sellers WHERE seller_name=? COLLATE NOCASE",
+            (name,),
+        ).fetchone()
+        if existing:
+            raise ValueError("A devotee with that name already exists.")
+        con.execute(
+            "INSERT INTO sellers(seller_name,active,created_at) VALUES(?,1,?)",
+            (name, now_iso()),
+        )
 
 def update_seller(seller_id, active):
     execute("UPDATE sellers SET active=? WHERE id=?", (1 if active else 0, int(seller_id)))

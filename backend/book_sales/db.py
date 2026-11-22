@@ -115,6 +115,101 @@ def connect():
     con.execute("PRAGMA journal_mode = WAL")
     return con
 
+
+def normalize_seller_name(value):
+    return " ".join(str(value or "").strip().split())
+
+
+def seller_name_key(value):
+    return normalize_seller_name(value).casefold()
+
+
+def resolve_seller_name(connection, value):
+    normalized = normalize_seller_name(value)
+    if not normalized:
+        return ""
+    key = seller_name_key(normalized)
+    for row in connection.execute("SELECT seller_name FROM sellers"):
+        if seller_name_key(row["seller_name"]) == key:
+            return normalize_seller_name(row["seller_name"])
+    return normalized
+
+
+def _canonicalize_seller_names(connection):
+    seller_rows = connection.execute(
+        "SELECT id, seller_name FROM sellers ORDER BY id"
+    ).fetchall()
+    groups = {}
+    for row in seller_rows:
+        key = seller_name_key(row["seller_name"])
+        if key:
+            groups.setdefault(key, []).append(row)
+
+    for rows in groups.values():
+        if len(rows) < 2:
+            if rows:
+                display_name = normalize_seller_name(rows[0]["seller_name"])
+                connection.execute(
+                    "UPDATE sellers SET seller_name=? WHERE id=?",
+                    (display_name, rows[0]["id"]),
+                )
+                for sale in connection.execute(
+                    "SELECT id, seller_name FROM sales"
+                ).fetchall():
+                    if seller_name_key(sale["seller_name"]) == seller_name_key(display_name):
+                        connection.execute(
+                            "UPDATE sales SET seller_name=? WHERE id=?",
+                            (display_name, sale["id"]),
+                        )
+            continue
+
+        sales_counts = {}
+        for row in rows:
+            sales_count = sum(
+                1
+                for sale in connection.execute("SELECT seller_name FROM sales")
+                if seller_name_key(sale["seller_name"])
+                == seller_name_key(row["seller_name"])
+            )
+            sales_counts[row["id"]] = sales_count
+        keeper = max(rows, key=lambda row: (sales_counts[row["id"]], -row["id"]))
+        display_name = normalize_seller_name(keeper["seller_name"])
+        connection.execute(
+            "UPDATE sellers SET seller_name=? WHERE id=?",
+            (display_name, keeper["id"]),
+        )
+
+        for row in rows:
+            if row["id"] != keeper["id"]:
+                target = connection.execute(
+                    "SELECT target_points FROM seller_targets WHERE seller_id=?",
+                    (row["id"],),
+                ).fetchone()
+                keeper_target = connection.execute(
+                    "SELECT target_points FROM seller_targets WHERE seller_id=?",
+                    (keeper["id"],),
+                ).fetchone()
+                if target is not None and keeper_target is None:
+                    connection.execute(
+                        "INSERT INTO seller_targets(seller_id,target_points) VALUES(?,?)",
+                        (keeper["id"], target["target_points"]),
+                    )
+                connection.execute(
+                    "DELETE FROM seller_targets WHERE seller_id=?",
+                    (row["id"],),
+                )
+                connection.execute(
+                    "DELETE FROM sellers WHERE id=?",
+                    (row["id"],),
+                )
+
+        for sale in connection.execute("SELECT id, seller_name FROM sales").fetchall():
+            if seller_name_key(sale["seller_name"]) == seller_name_key(display_name):
+                connection.execute(
+                    "UPDATE sales SET seller_name=? WHERE id=?",
+                    (display_name, sale["id"]),
+                )
+
 def initialize_database():
     from datetime import datetime
     now = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -164,6 +259,7 @@ def initialize_database():
             """,
             (now,),
         )
+        _canonicalize_seller_names(con)
         con.execute("INSERT OR IGNORE INTO settings(setting_key, setting_value) VALUES ('overall_target','0')")
         con.execute("INSERT OR IGNORE INTO settings(setting_key, setting_value) VALUES ('fallback_points','1')")
         # Seed catalog and seller list only when empty, making first run demonstrable.

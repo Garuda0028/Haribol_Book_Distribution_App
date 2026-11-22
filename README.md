@@ -57,7 +57,7 @@ Each valid synced book-level response can represent multiple copies of one book.
 - pandas for tabular analytics
 - Python standard library for CSV parsing, hashing, file management and database access; `google-auth` for optional Google Sheets service-account access
 
-Dependencies are installed from PyPI during setup. A local run can work offline after dependencies are installed; the hosted app and Google Sheets sync require internet access. No external CSS or font URLs are used; the UI uses system fonts and Streamlit's built-in styling. The JPEG report uses the bundled Lato font for currency amounts; its license is in `assets/Lato-OFL.txt`.
+Dependencies are installed from PyPI during setup. A local run can work offline after dependencies are installed; the hosted app and Google Sheets sync require internet access. No external CSS or font URLs are used; the UI uses system fonts and Streamlit's built-in styling. The JPEG report uses a bundled image of the [Wikimedia Commons rupee symbol](https://commons.wikimedia.org/wiki/File:Indian_Rupee_symbol.svg), which Commons identifies as public domain.
 
 ## Setup
 

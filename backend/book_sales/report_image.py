@@ -240,7 +240,7 @@ def render_distribution_report_jpeg(report):
             (x1, y, x3, y + _ROW_HEIGHT),
             f"{currency_symbol}{float(amount):,.2f}",
             color,
-            bold,
+            regular,
         )
         y += _ROW_HEIGHT
 

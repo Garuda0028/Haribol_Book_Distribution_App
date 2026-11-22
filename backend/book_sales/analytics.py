@@ -40,23 +40,36 @@ def accumulated_points(as_of_date, start_date=None, end_date=None):
     ).iloc[0]["points"]
     return float(total)
 
-def leaderboard(include_all_active=False, sale_date=None):
+def leaderboard(include_all_active=False, sale_date=None, limit=None):
     sql = """
         SELECT s.seller_name AS seller,
                COALESCE(SUM(sa.quantity),0) AS books_sold,
                COALESCE(SUM(COALESCE(sa.reported_points_total, sa.points * sa.quantity)),0) AS points,
                COALESCE(ROUND(SUM(COALESCE(sa.amount_collected, sa.unit_price * sa.quantity)),2),0) AS revenue,
                COALESCE(ROUND(SUM(sa.shastra_daan),2),0) AS shastra_daan,
+               MAX(sa.sale_date) AS latest_sale_date,
                COALESCE(t.target_points,0) AS target_points
         FROM sellers s
         LEFT JOIN sales sa ON lower(trim(sa.seller_name)) = lower(trim(s.seller_name))
-                         AND (? IS NULL OR sa.sale_date = ?)
+                         AND (? IS NULL OR sa.sale_date <= ?)
         LEFT JOIN seller_targets t ON t.seller_id = s.id
     """
     if not include_all_active:
         sql += " WHERE s.active=1"
-    sql += " GROUP BY s.id, s.seller_name, t.target_points ORDER BY points DESC, seller COLLATE NOCASE"
-    df = query_df(sql, (sale_date, sale_date))
+        sql += " AND EXISTS (SELECT 1 FROM sales recent "
+        sql += "WHERE lower(trim(recent.seller_name)) = lower(trim(s.seller_name)) "
+        sql += "AND (? IS NULL OR recent.sale_date <= ?))"
+    sql += (
+        " GROUP BY s.id, s.seller_name, t.target_points "
+        "ORDER BY latest_sale_date DESC, points DESC, seller COLLATE NOCASE"
+    )
+    params = (sale_date, sale_date)
+    if not include_all_active:
+        params += (sale_date, sale_date)
+    if limit is not None:
+        sql += " LIMIT ?"
+        params += (max(0, int(limit)),)
+    df = query_df(sql, params)
     if not df.empty:
         df["target_progress_pct"] = df.apply(
             lambda r: round(float(r["points"]) / float(r["target_points"]) * 100, 1) if r["target_points"] > 0 else None,

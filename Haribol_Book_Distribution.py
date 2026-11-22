@@ -825,6 +825,7 @@ def _render_app():
                 "points": "Points earned",
                 "revenue": "Collection received (₹)",
                 "shastra_daan": "Shastra Daan (₹)",
+                "latest_sale_date": "Latest distribution",
                 "target_points": "Points target",
                 "target_progress_pct": "Target progress (%)",
             }
@@ -896,7 +897,7 @@ def _render_app():
         previous_summary = dashboard_summary(
             (selected_date - timedelta(days=1)).isoformat()
         )
-        leaders = leaderboard(sale_date=selected_date.isoformat())
+        leaders = leaderboard(sale_date=date.today().isoformat(), limit=10)
         average_copies_per_record = (
             summary["books_sold"] / summary["sale_records"]
             if summary["sale_records"]
@@ -1011,7 +1012,7 @@ def _render_app():
                     color="#7084B5",
                 )
 
-        with st.expander("Devotee leaderboard", expanded=True):
+        with st.expander("Top 10 most active devotees", expanded=True):
             if leaders.empty:
                 st.info("Import response data to see the leaderboard.")
             else:

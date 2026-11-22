@@ -6,11 +6,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageFont
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from book_sales.analytics import distribution_report
+from book_sales import report_image
 from book_sales.report_image import render_distribution_report_jpeg
 
 
@@ -146,6 +147,33 @@ class DistributionReportTests(unittest.TestCase):
             self.assertEqual(image.format, "JPEG")
             self.assertEqual(image.width, 1080)
             self.assertGreater(image.height, 900)
+
+    def test_currency_rows_use_bundled_font_with_rupee_glyph(self):
+        report = distribution_report("2026-05-03")
+        with (
+            patch(
+                "book_sales.report_image._font",
+                return_value=ImageFont.load_default(size=25),
+            ),
+            patch(
+                "book_sales.report_image._draw_cell",
+                wraps=report_image._draw_cell,
+            ) as draw_cell,
+        ):
+            render_distribution_report_jpeg(report)
+
+        currency_calls = [
+            call for call in draw_cell.call_args_list
+            if call.args[2] in ("\u20b97.00", "\u20b94.00")
+        ]
+        self.assertEqual(len(currency_calls), 2)
+        for call in currency_calls:
+            font = call.args[4]
+            rupee = font.getmask("\u20b9")
+            missing = font.getmask("\U0010ffff")
+            self.assertNotEqual(
+                (rupee.size, bytes(rupee)), (missing.size, bytes(missing))
+            )
 
 
 if __name__ == "__main__":

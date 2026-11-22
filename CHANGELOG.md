@@ -1,5 +1,9 @@
 # Release history
 
+## [Unreleased]
+
+- Fix rupee symbol rendering in downloadable distribution reports across platforms
+
 ## [1.11.0] - 2026-11-22
 
 - Show the 10 most recently active devotees with cumulative sales through today, ordered by latest distribution date

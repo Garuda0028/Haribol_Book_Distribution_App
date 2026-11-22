@@ -1,8 +1,8 @@
-# Haribol_Book_Distribution
+# Haribol Book Distribution
 
-A modular, cross-platform application built with Python, Streamlit, pandas, and SQLite. It runs locally on Windows, macOS, and Linux. No Node.js, React, PowerShell, external CSS, hosted backend, or Google Cloud project is required for local/default use. Google Sheets credentials are needed only for the optional live spreadsheet sync.
+Haribol Book Distribution is a Python and Streamlit app for tracking book distribution, devotee activity, and targets. It is deployed on Streamlit Community Cloud and can also be run locally on Windows, macOS, and Linux.
 
-The app can also be launched from Streamlit Community Cloud using `streamlit_app.py`. Cloud hosting does not make the local SQLite database durable; see [Streamlit Community Cloud deployment](#streamlit-community-cloud-deployment) before using it with real sales data.
+The app uses SQLite for its database and Google Sheets as the source for the synced book catalogue and website response data. Local SQLite data is stored on the computer running the app. Streamlit Community Cloud storage is ephemeral, so hosted app data must be backed up and should not be treated as durable storage; see [Streamlit Community Cloud deployment](#streamlit-community-cloud-deployment).
 
 ## Configuration
 
@@ -19,9 +19,9 @@ FALLBACK_POINTS=1
 
 `APP_NAME` controls the displayed app identity. `BOOK_SALES_DATA_DIR` is the simple local data-folder name (relative to the project unless an absolute path is intentionally configured). `OVERALL_POINTS_TARGET` is the overall dashboard target; optional `OVERALL_TARGET_START_DATE` and `OVERALL_TARGET_END_DATE` values limit its progress calculation to an inclusive date period. Leave either date blank to keep that side of the period open. Dates use `YYYY-MM-DD`. `FALLBACK_POINTS` sets points for unknown titles. These preferences are saved back to `.env` locally. Google Sheets workbook ID, tab names, and sync schedule are configurable from the app's Settings page and saved in SQLite for local runs. On Streamlit Community Cloud, use the `[app_settings]` Secrets table described below for settings that must survive restarts.
 
-Environment variables with the same names override `.env`; Streamlit Cloud `[app_settings]` values override both environment and SQLite settings. The local `.env` file is gitignored; do not upload it. The Google Sheet is the source of truth for book variants, prices, and points. Individual devotee targets and sales records remain in the local database.
+Environment variables with the same names override `.env`; Streamlit Cloud `[app_settings]` values override both environment and SQLite settings. The local `.env` file is gitignored; do not upload it. The Google Sheet is the source of truth for book variants, prices, and points. Sales and devotee targets are stored in the SQLite database for the running app instance; local runs persist on disk, while Community Cloud storage is ephemeral.
 
-The app version is read from the newest release in `CHANGELOG.md`; it is not a manually edited `.env` value. When preparing a release, run one of these from the project folder to automatically increment the version and add a dated release-history entry:
+The app version is read from the newest numbered release in `CHANGELOG.md`; it is not a manually edited `.env` value. The `[Unreleased]` section documents changes that have not yet been assigned a release version. When preparing a release, run one of these from the project folder to automatically increment the version and add a dated release-history entry:
 
 ```text
 python scripts/release.py feature "Describe the new feature"
@@ -38,22 +38,23 @@ Use `feature` for a minor-version increment, `fix` for a patch increment, and `b
 - Individual target per devotee.
 - Fallback points for unknown book titles.
 - Manual point correction for a specific historical sale.
-- Devotee leaderboard, daily totals, book-by-book performance, filters, CSV exports, and prior import history.
+- Top 10 most active devotees, daily totals, book-by-book performance, filters, CSV exports, and prior import history.
+- Devotee names from imports match existing names despite differences in case or extra whitespace.
 - Overview comparisons against the previous day, configurable 7/30/90-day trends, average copies per sale/day, and best distribution day.
 
-The Overview date controls the daily metrics and book performance. Overall target progress uses points accumulated through the selected date, including that date. The trend period selector shows activity up to the selected date; the summary metrics include a previous-day comparison where available.
+The Overview date controls the daily metrics, previous-day comparisons, trend charts, and book performance. Overall target progress uses points accumulated through the selected date, including that date. The trend period selector shows activity up to the selected date. The **Top 10 most active devotees** list is independent of the Overview date: it aggregates sales through today, includes earlier sales, shows the latest distribution date for each devotee, and orders the most recently active devotees first.
 
 Each valid synced book-level response can represent multiple copies of one book. Website sales preserve the response sheet's reported price and points totals. Updating the catalogue does not silently rewrite historical sales.
 
 ## Technology
 
 - Python 3.11+
-- Streamlit for the local user interface
-- SQLite for durable local storage
+- Streamlit for the hosted and local user interface
+- SQLite for local storage (hosted Streamlit Community Cloud storage is ephemeral)
 - pandas for tabular analytics
 - Python standard library for CSV parsing, hashing, file management and database access; `google-auth` for optional Google Sheets service-account access
 
-Dependencies are installed from PyPI during setup. After installation, normal app use does not need an internet connection; syncing the Google Sheets workbook does. No external CSS or font URLs are used; the app uses system fonts and Streamlit's built-in styling.
+Dependencies are installed from PyPI during setup. A local run can work offline after dependencies are installed; the hosted app and Google Sheets sync require internet access. No external CSS or font URLs are used; the app uses system fonts and Streamlit's built-in styling.
 
 ## Setup
 
@@ -114,12 +115,12 @@ The app interface is contained in `Haribol_Book_Distribution.py`. `streamlit_app
 
 ## Streamlit Community Cloud deployment
 
-The Cloud entry point is `streamlit_app.py`. It invokes the existing dashboard directly instead of starting the local launcher or a second Streamlit process.
+The Cloud entry point is `streamlit_app.py`; it invokes the dashboard directly instead of starting the local launcher or a second Streamlit process.
 
 1. Push this project to a GitHub repository you can access. Do not commit `.env`, the local database, or imported sales CSVs.
 2. In [Streamlit Community Cloud](https://share.streamlit.io/), create an app from that repository and select the branch and `streamlit_app.py` as the **Main file path**.
 3. Deploy. The dependencies are installed from `requirements.txt`; no local launcher command is needed to open the app.
-4. Choose **Private** visibility in the Streamlit app settings and grant access only to approved users. The application itself does not provide login or role-based access.
+4. Choose the appropriate visibility in the Streamlit app settings and configure access there. The application itself does not provide login or role-based access.
 
 To enable sync, create a Google service account, enable the Google Sheets API, and share the target spreadsheet with the service account's email as a Viewer. Add its credentials in Streamlit Community Cloud under **App settings → Secrets**, using TOML:
 
@@ -158,11 +159,11 @@ google_sheets_manual_sync = true
 
 Settings supplied in `[app_settings]` take precedence over SQLite and environment values and are read-only in the app; edit them in Cloud Secrets and restart the app. You can omit keys you do not want to manage there, but omitted values continue to use local storage and are not durable on Cloud. Select **Test connection** in **Settings → Google Sheets connection** to check read-only access and validate the configured tab headers. Sync actions use the service account from `[google_service_account]`. The app never writes service-account credentials to SQLite.
 
-Keep the Cloud app private and restrict access to who can use or edit its Secrets. This app has no separate user accounts or roles, so dashboard users can initiate syncs; settings managed through Secrets can only be changed by someone with access to the Cloud Secrets editor. The **Response entry** page embeds the existing `books.iskw.in` form, which remains publicly accessible at its original URL even when this dashboard is private. Website responses are imported from the configured workbook; there is no response CSV upload page. The `Lists` tab supplies catalogue and inventory values. The `responses` tab supplies book-level rows, including book subcategory and submitted price, amount, points, and points total; these appear in **Book-level responses** and dashboard totals. The `submissions` tab supplies full-submission totals and Lakshmi/Shastra Daan values shown in **Submission summaries**. Repeated syncs update changed rows and do not duplicate them. Website sales retain the values reported in the response sheet; later catalogue changes do not rewrite historical sales.
+Set the app's visibility and access permissions to suit its audience, and restrict access to who can use or edit its Secrets. This app has no separate user accounts or roles, so dashboard users can initiate syncs; settings managed through Secrets can only be changed by someone with access to the Cloud Secrets editor. The **Response entry** page embeds the existing `books.iskw.in` form, which remains publicly accessible at its original URL regardless of dashboard visibility. Website responses are imported from the configured workbook; there is no response CSV upload page. The `Lists` tab supplies catalogue and inventory values. The `responses` tab supplies book-level rows, including book subcategory and submitted price, amount, points, and points total; these appear in **Book-level responses** and dashboard totals. The `submissions` tab supplies full-submission totals and Lakshmi/Shastra Daan values shown in **Submission summaries**. Repeated syncs update changed rows and do not duplicate them. Website sales retain the values reported in the response sheet; later catalogue changes do not rewrite historical sales.
 
 The configured workbook tabs must have these headers (column names are case-insensitive): `Lists`: `Book Category, Sub Category, Book, Language, Price, Points, Stock, Stock Value, Books Distributed, Balance Books, Amount Collected, Books Billed, Billed Amount, Books Unbilled, Unbilled Amount, Allotted Books, Allotted Books Amt, IBC-S Stock, IBC-S Stock Amt`; `responses`: `submission_id, submitted_at, name, location, date, book_category, book_sub_category, book_name, language, quantity, price, amount, points, points_total`; `submissions`: `submission_id, submitted_at, name, location, date, total_copies, total_points, lakshmi_due, lakshmi_transferred, shastra_daan`. The Lists header `Allotted Boks Amt` (as currently spelled in the sheet) is accepted as an alias for `Allotted Books Amt`. These headers and all three configured tab names are checked by **Test connection**. Starting stock, stock value, and other inventory fields are loaded from Lists as supplied; blanks stay blank. Books distributed is calculated from synced website-response quantities matched by book name and language, and calculated balance is starting stock minus those quantities. The Lists tab's original distributed and balance values remain visible for comparison. The service account needs Viewer access to this workbook.
 
-**Important: Community Cloud is not durable storage for this app's SQLite data.** The `[app_settings]` Secrets table can preserve the listed configuration values, but sales, devotee targets, catalogue data, and other SQLite records can be lost when the app is restarted or redeployed. Keep independent backups and migrate to durable hosted storage before relying on Cloud as the system of record. Google credentials remain in Streamlit Secrets and are separate from SQLite backups.
+**Important: Community Cloud is not durable storage for this app's SQLite data.** The `[app_settings]` Secrets table can preserve the listed configuration values, but sales, devotee targets, catalogue data, and other SQLite records can be lost when the app is restarted or redeployed. Download independent backups and use durable hosted storage before relying on Cloud as the system of record. Google credentials remain in Streamlit Secrets and are separate from SQLite backups.
 
 By default, the app performs a full sync of `Lists`, `responses`, and `submissions` immediately when the first dashboard session opens and then every 5 minutes while a dashboard session is open. Locally, configure the interval (1–1440 minutes), turn automatic sync on or off, and independently allow or disable manual sync in **Settings → Google Sheets sync schedule**. On Cloud, set durable sync options in `[app_settings]`; those values are read-only in the app. Manual full sync is available on **Response entry**; the catalogue page also offers a Lists-only refresh. Scheduled syncing pauses when there are no active dashboard sessions and resumes when a session opens. Each full sync fetches and validates all configured data before applying it in one local transaction.
 
@@ -206,16 +207,16 @@ Haribol_Book_Distribution/
 
 The app opens with an expandable left-side navigation for the dashboard and management pages. The current UI version is shown in the sidebar and under **Settings → About this app**. A complete ZIP backup is available from **Settings → Data and backups**. The Overview page displays the Hare Krishna maha-mantra and the portrait stored at `assets/Srila_Prabhupada.jpeg`.
 
-`Haribol_Book_Distribution_Data` is the app's persistent storage for its database, catalogue mirror, and imported CSV history; it is data, not a code or sample-data folder. Existing `data/` contents are moved there automatically on first launch when the new folder does not already exist.
+`Haribol_Book_Distribution_Data` is the local installation's storage directory for its database, catalogue mirror, and imported CSV history; it is data, not a code or sample-data folder. Existing `data/` contents are moved there automatically on first local launch when the new folder does not already exist. Streamlit Community Cloud uses instance-local storage instead, which is not durable.
 
-## Privacy / local-only behavior
+## Privacy and storage behavior
 
-- The server binds to `127.0.0.1`, not `0.0.0.0`.
-- Usage statistics are disabled by the launcher.
-- No cloud database or third-party analytics are configured. The optional Google Sheets sync reads the configured workbook; the UI uses system fonts and inline CSS.
-- The database and imported CSV archives are stored in `Haribol_Book_Distribution_Data`.
-- Normal app use can be offline; syncing the Google Sheets workbook requires internet access.
-- Do not expose the app through port forwarding or change the bind address if it must remain local-only.
+- When launched locally, the app binds to `127.0.0.1`; it is not exposed to the local network by default. The Streamlit Community Cloud deployment is served by Streamlit and follows the app's configured sharing/access settings.
+- The local launcher disables Streamlit usage-statistics collection. Hosted deployments are subject to the hosting platform's behavior and settings.
+- The app does not use a separate cloud database or third-party analytics service. Google Sheets sync reads the configured workbook; the UI uses system fonts and inline CSS.
+- Local database and imported CSV archives are stored in `Haribol_Book_Distribution_Data`. Hosted SQLite data is ephemeral and needs independent backups.
+- Local app use can be offline after dependencies are installed; hosted app access and Google Sheets sync require internet connectivity.
+- Do not expose a local app through port forwarding unless network access is intended.
 
 ## Backups
 
@@ -223,4 +224,4 @@ Use **Settings → Data and backups → Download complete data backup** to downl
 
 ## Scalability notes
 
-SQLite is suitable for a single-computer, local-first app and supports indexed queries. The project separates UI, data access, catalogue, import, settings, and analytics modules so future changes can be isolated. If concurrent multi-user access or large-scale deployment becomes necessary, the repository/service layer can later be adapted to PostgreSQL and a separately hosted application; that is intentionally not part of this local-only version.
+SQLite is suitable for local use and supports indexed queries. Streamlit Community Cloud currently runs the app with instance-local SQLite storage, which is not durable across restarts or redeployments. The project separates UI, data access, catalogue, import, settings, and analytics modules so the storage layer can be adapted to a durable hosted database if required for production-scale or multi-user use.

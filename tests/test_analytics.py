@@ -10,7 +10,12 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from book_sales.analytics import accumulated_points, export_csv, export_sales_csv
+from book_sales.analytics import (
+    accumulated_points,
+    export_csv,
+    export_sales_csv,
+    leaderboard,
+)
 from book_sales.settings import (
     _persistent_settings_from_secrets,
     get_settings,
@@ -65,6 +70,74 @@ class AnalyticsTests(unittest.TestCase):
             accumulated_points("2026-05-01", "2026-05-01", "2026-05-01"),
             7,
         )
+
+    def test_leaderboard_accumulates_through_today_and_shows_ten_latest_devotees(self):
+        connection = sqlite3.connect(":memory:")
+        connection.executescript(
+            """
+            CREATE TABLE sellers (
+                id INTEGER PRIMARY KEY,
+                seller_name TEXT,
+                active INTEGER
+            );
+            CREATE TABLE sales (
+                seller_name TEXT,
+                sale_date TEXT,
+                quantity INTEGER,
+                points REAL,
+                reported_points_total REAL,
+                amount_collected REAL,
+                unit_price REAL,
+                shastra_daan REAL
+            );
+            CREATE TABLE seller_targets (
+                seller_id INTEGER,
+                target_points REAL
+            );
+            """
+        )
+        connection.executemany(
+            "INSERT INTO sellers VALUES (?, ?, 1)",
+            [(index, f"Devotee {index:02}",) for index in range(12)],
+        )
+        sales = []
+        for index in range(5):
+            sales.append((f"Devotee {index:02}", "2026-05-03", 10, 1, None, None, 1, 0))
+        for index in range(5, 8):
+            sales.append((f"Devotee {index:02}", "2026-05-02", 6, 1, None, None, 1, 0))
+        for index in range(8, 10):
+            sales.append((f"Devotee {index:02}", "2026-05-01", 4, 1, None, None, 1, 0))
+        sales.extend(
+            [
+                ("Devotee 00", "2026-05-02", 2, 1, None, None, 1, 0),
+                ("Devotee 10", "2026-04-30", 3, 1, None, None, 1, 0),
+                ("Devotee 11", "2026-05-04", 50, 1, None, None, 1, 0),
+            ]
+        )
+        connection.executemany(
+            "INSERT INTO sales VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            sales,
+        )
+
+        def query_df(sql, params):
+            return pd.read_sql_query(sql, connection, params=params)
+
+        try:
+            with patch("book_sales.analytics.query_df", side_effect=query_df):
+                result = leaderboard(sale_date="2026-05-03", limit=10)
+
+            self.assertEqual(len(result), 10)
+            self.assertEqual(result.iloc[0]["seller"], "Devotee 00")
+            self.assertEqual(result.iloc[0]["books_sold"], 12)
+            self.assertEqual(result.iloc[0]["latest_sale_date"], "2026-05-03")
+            self.assertEqual(
+                result["latest_sale_date"].tolist(),
+                sorted(result["latest_sale_date"], reverse=True),
+            )
+            self.assertNotIn("Devotee 10", result["seller"].tolist())
+            self.assertNotIn("Devotee 11", result["seller"].tolist())
+        finally:
+            connection.close()
 
     def test_export_escapes_formula_text_but_preserves_numbers(self):
         frame = pd.DataFrame(
